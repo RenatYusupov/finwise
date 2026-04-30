@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useFinanceStore } from '@/features/finance/store';
 import { generateAiResponse } from '@/features/ai/smartResponses';
@@ -12,6 +12,90 @@ const QUICK_PROMPTS = [
   { text: 'Советы по инвестициям', icon: '📈' },
 ];
 
+// Shared voice hook — fixed operator precedence for `supported`
+function useVoiceInput(onResult: (text: string) => void) {
+  const [isListening, setIsListening] = useState(false);
+  const [voiceText, setVoiceText] = useState('');
+  const recognitionRef = useRef<any>(null);
+
+  const supported =
+    typeof window !== 'undefined' &&
+    (!!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition);
+
+  const toggle = useCallback(() => {
+    const SpeechRecognition =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      alert('Голосовой ввод не поддерживается в вашем браузере. Используйте Chrome или Safari.');
+      return;
+    }
+
+    if (isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+      setVoiceText('');
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognitionRef.current = recognition;
+    recognition.lang = 'ru-RU';
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => setIsListening(true);
+
+    recognition.onresult = (event: any) => {
+      const transcript = Array.from(event.results)
+        .map((r: any) => r[0].transcript)
+        .join('');
+      setVoiceText(transcript);
+
+      const lastResult = event.results[event.results.length - 1];
+      if (lastResult?.isFinal) {
+        onResult(transcript);
+        setVoiceText('');
+        setIsListening(false);
+      }
+    };
+
+    recognition.onerror = (e: any) => {
+      console.error('Speech error:', e.error);
+      setIsListening(false);
+      setVoiceText('');
+      if (e.error === 'not-allowed') {
+        alert('Разрешите доступ к микрофону в настройках браузера');
+      } else if (e.error === 'no-speech') {
+        // silently ignore — user just didn't speak
+      } else {
+        alert(`Ошибка голосового ввода: ${e.error}`);
+      }
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+
+    try {
+      recognition.start();
+    } catch (err) {
+      console.error('Recognition start error:', err);
+      setIsListening(false);
+    }
+  }, [isListening, onResult]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      recognitionRef.current?.stop();
+    };
+  }, []);
+
+  return { isListening, voiceText, toggle, supported };
+}
+
 export function AiChatPage() {
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
@@ -21,7 +105,7 @@ export function AiChatPage() {
   const { aiMessages, addAiMessage, clearAiChat, transactions, goals, getMonthSummary, getCategorySpending } =
     useFinanceStore();
 
-  const handleSend = async (text: string) => {
+  const handleSend = useCallback(async (text: string) => {
     const trimmed = text.trim();
     if (!trimmed || isTyping) return;
     setInput('');
@@ -37,30 +121,42 @@ export function AiChatPage() {
 
     addAiMessage({ role: 'assistant', content: response });
     setIsTyping(false);
-  };
+  }, [isTyping, addAiMessage, getMonthSummary, getCategorySpending, transactions, goals]);
+
+  const { isListening, voiceText, toggle: toggleVoice, supported: voiceSupported } = useVoiceInput((text) => {
+    handleSend(text);
+  });
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [aiMessages, isTyping]);
+  }, [aiMessages, isTyping, voiceText]);
 
   useEffect(() => {
     if (aiMessages.length === 0) {
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         addAiMessage({
           role: 'assistant',
           content:
-            'Привет! Я FinWise — твой персональный финансовый советник 🦉\n\nЯ анализирую твои доходы и расходы в реальном времени и даю конкретные советы. Спроси меня что-нибудь!',
+            'Привет! Я FinWise — твой персональный финансовый советник 🦉\n\nЯ анализирую твои доходы и расходы в реальном времени и даю конкретные советы. Спроси меня что-нибудь или нажми на микрофон!',
         });
       }, 400);
+      return () => clearTimeout(timer);
     }
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const hasMessages = aiMessages.length > 0;
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend(input);
+    }
+  };
 
   return (
     <div className="flex flex-col flex-1 min-h-0" style={{ background: '#F8F7FF' }}>
       {/* Header */}
-      <div className="px-4 pt-5 pb-4 glass border-b border-white/60">
+      <div className="flex-shrink-0 px-4 pt-5 pb-4 glass border-b border-white/60">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <motion.div
@@ -95,9 +191,9 @@ export function AiChatPage() {
         </div>
       </div>
 
-      {/* Messages */}
+      {/* Messages area — flex-1 min-h-0 makes it scrollable */}
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-4">
-        {/* Empty state with quick prompts */}
+        {/* Empty state */}
         {!hasMessages && !isTyping && (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
@@ -113,7 +209,9 @@ export function AiChatPage() {
                 🦉
               </motion.div>
               <div className="font-bold text-gray-800 text-lg mb-1">Чем могу помочь?</div>
-              <div className="text-sm text-gray-500">Задай любой вопрос о своих финансах</div>
+              <div className="text-sm text-gray-500">
+                {voiceSupported ? 'Задай вопрос или нажми 🎤' : 'Задай вопрос текстом'}
+              </div>
             </div>
             <div className="grid grid-cols-2 gap-2">
               {QUICK_PROMPTS.map((prompt, i) => (
@@ -125,7 +223,7 @@ export function AiChatPage() {
                   onClick={() => handleSend(prompt.text)}
                   className="flex items-center gap-2 bg-white rounded-2xl px-3 py-3 text-sm text-gray-700 haptic text-left shadow-sm border border-gray-100"
                 >
-                  <span className="text-lg">{prompt.icon}</span>
+                  <span className="text-lg flex-shrink-0">{prompt.icon}</span>
                   <span className="font-medium leading-tight">{prompt.text}</span>
                 </motion.button>
               ))}
@@ -150,13 +248,11 @@ export function AiChatPage() {
               )}
               <div
                 className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm whitespace-pre-line leading-relaxed ${
-                  msg.role === 'user'
-                    ? 'text-white rounded-br-sm'
-                    : 'text-gray-800 rounded-bl-sm shadow-sm'
+                  msg.role === 'user' ? 'rounded-br-sm' : 'rounded-bl-sm shadow-sm'
                 }`}
                 style={msg.role === 'user'
-                  ? { background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }
-                  : { background: '#FFFFFF', border: '1px solid rgba(108,99,255,0.08)' }
+                  ? { background: 'linear-gradient(135deg, #6C63FF, #9B59B6)', color: 'white' }
+                  : { background: '#FFFFFF', color: '#1a1a2e', border: '1px solid rgba(108,99,255,0.08)' }
                 }
               >
                 {msg.content}
@@ -192,6 +288,23 @@ export function AiChatPage() {
           </motion.div>
         )}
 
+        {/* Voice text preview */}
+        <AnimatePresence>
+          {voiceText && (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              className="flex justify-end"
+            >
+              <div className="max-w-[80%] rounded-2xl rounded-br-sm px-4 py-3 text-sm italic opacity-70"
+                style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)', color: 'white' }}>
+                🎤 {voiceText}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* Quick prompts after messages */}
         {hasMessages && !isTyping && (
           <motion.div
@@ -215,27 +328,74 @@ export function AiChatPage() {
         <div ref={bottomRef} />
       </div>
 
-      {/* Input */}
-      <div className="px-4 py-3 glass border-t border-white/60 safe-bottom">
+      {/* Input bar — flex-shrink-0 ensures it's ALWAYS visible, never scrolled away */}
+      <div className="flex-shrink-0 px-4 py-3 glass border-t border-white/60 safe-bottom">
+        {/* Listening indicator */}
+        <AnimatePresence>
+          {isListening && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="flex items-center gap-2 mb-2 px-1"
+            >
+              <motion.div
+                animate={{ scale: [1, 1.3, 1] }}
+                transition={{ repeat: Infinity, duration: 0.6 }}
+                className="w-2 h-2 rounded-full bg-red-500"
+              />
+              <span className="text-xs text-red-500 font-medium">Говорите сейчас...</span>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         <div className="flex gap-2 items-center">
-          <div className="flex-1 flex items-center rounded-2xl px-4 py-2.5 gap-2"
-            style={{ background: 'rgba(108,99,255,0.06)', border: '1.5px solid rgba(108,99,255,0.15)' }}>
+          {/* Voice button — only shown if supported */}
+          {voiceSupported && (
+            <motion.button
+              whileTap={{ scale: 0.88 }}
+              onClick={toggleVoice}
+              animate={isListening ? { scale: [1, 1.1, 1] } : { scale: 1 }}
+              transition={isListening ? { repeat: Infinity, duration: 0.8 } : { duration: 0.1 }}
+              className="w-11 h-11 rounded-2xl flex items-center justify-center text-lg flex-shrink-0 haptic"
+              style={isListening
+                ? { background: '#FF4757', boxShadow: '0 4px 16px rgba(255,71,87,0.4)' }
+                : { background: 'rgba(108,99,255,0.1)' }
+              }
+              aria-label={isListening ? 'Остановить запись' : 'Голосовой ввод'}
+            >
+              🎤
+            </motion.button>
+          )}
+
+          {/* Text input */}
+          <div
+            className="flex-1 flex items-center rounded-2xl px-4 py-2.5 gap-2"
+            style={{ background: 'rgba(108,99,255,0.06)', border: '1.5px solid rgba(108,99,255,0.15)' }}
+          >
             <input
               ref={inputRef}
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSend(input)}
-              placeholder="Спроси что-нибудь..."
-              className="flex-1 bg-transparent outline-none text-sm text-gray-800 placeholder-gray-400"
+              onKeyDown={handleKeyDown}
+              placeholder={isListening ? 'Слушаю...' : 'Спроси что-нибудь...'}
+              disabled={isListening}
+              className="flex-1 bg-transparent outline-none text-sm text-gray-800 placeholder-gray-400 min-w-0"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
             />
           </div>
+
+          {/* Send button */}
           <motion.button
             whileTap={{ scale: 0.88 }}
             onClick={() => handleSend(input)}
             disabled={!input.trim() || isTyping}
             className="w-11 h-11 rounded-2xl text-white flex items-center justify-center haptic disabled:opacity-40 text-lg flex-shrink-0"
             style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}
+            aria-label="Отправить"
           >
             ↑
           </motion.button>

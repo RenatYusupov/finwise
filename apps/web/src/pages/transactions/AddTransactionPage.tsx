@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useFinanceStore, EXPENSE_CATEGORIES, INCOME_CATEGORIES, type TransactionType } from '@/features/finance/store';
@@ -28,37 +28,78 @@ export function AddTransactionPage() {
   const categories = type === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
   const isExpense = type === 'expense';
 
+  // Cleanup recognition on unmount
+  useEffect(() => {
+    return () => {
+      recognitionRef.current?.stop();
+    };
+  }, []);
+
   const handleVoiceInput = () => {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
     if (!SpeechRecognition) {
-      alert('Голосовой ввод не поддерживается в вашем браузере');
+      alert('Голосовой ввод не поддерживается в вашем браузере. Используйте Chrome или Safari.');
       return;
     }
+
     if (isListening) {
       recognitionRef.current?.stop();
       setIsListening(false);
+      setVoiceText('');
       return;
     }
+
     const recognition = new SpeechRecognition();
     recognitionRef.current = recognition;
     recognition.lang = 'ru-RU';
     recognition.continuous = false;
     recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
     recognition.onstart = () => setIsListening(true);
+
     recognition.onresult = (event: any) => {
-      const transcript = Array.from(event.results).map((r: any) => r[0].transcript).join('');
+      const transcript = Array.from(event.results)
+        .map((r: any) => r[0].transcript)
+        .join('');
       setVoiceText(transcript);
-      if (event.results[0]?.isFinal) {
+
+      // Use the LAST result's isFinal flag (not event.results[0])
+      const lastResult = event.results[event.results.length - 1];
+      if (lastResult?.isFinal) {
         const parsed = parseVoiceInput(transcript);
         if (parsed.amount) setAmount(String(parsed.amount));
         if (parsed.description) setDescription(parsed.description);
         setVoiceText('');
+        setIsListening(false);
       }
     };
-    recognition.onerror = () => { setIsListening(false); setVoiceText(''); };
-    recognition.onend = () => setIsListening(false);
-    recognition.start();
+
+    recognition.onerror = (e: any) => {
+      console.error('Speech error:', e.error);
+      setIsListening(false);
+      setVoiceText('');
+      if (e.error === 'not-allowed') {
+        alert('Разрешите доступ к микрофону в настройках браузера');
+      } else if (e.error === 'no-speech') {
+        // silently ignore
+      } else {
+        alert(`Ошибка голосового ввода: ${e.error}`);
+      }
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+
+    try {
+      recognition.start();
+    } catch (err) {
+      console.error('Recognition start error:', err);
+      setIsListening(false);
+    }
   };
 
   const handleSubmit = () => {
@@ -77,10 +118,14 @@ export function AddTransactionPage() {
   const accentColor = isExpense ? '#FF6B35' : '#00C896';
   const accentBg = isExpense ? '#FFF0EB' : '#E8FFF5';
 
+  const voiceSupported =
+    typeof window !== 'undefined' &&
+    (!!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition);
+
   return (
     <div className="flex flex-col flex-1 min-h-0" style={{ background: 'var(--bg-warm)' }}>
       {/* Header */}
-      <div className="flex items-center gap-3 px-4 pt-5 pb-4 glass border-b border-white/60">
+      <div className="flex-shrink-0 flex items-center gap-3 px-4 pt-5 pb-4 glass border-b border-white/60">
         <button
           onClick={() => navigate(-1)}
           className="w-9 h-9 rounded-2xl flex items-center justify-center haptic text-lg"
@@ -91,7 +136,8 @@ export function AddTransactionPage() {
         <h1 className="text-lg font-bold text-gray-900">Новая операция</h1>
       </div>
 
-      <div className="flex flex-col flex-1 overflow-y-auto">
+      {/* Scrollable content */}
+      <div className="flex-1 min-h-0 overflow-y-auto">
         {/* Type selector */}
         <div className="flex gap-1 mx-4 mt-4 rounded-2xl p-1" style={{ background: 'rgba(0,0,0,0.06)' }}>
           {([
@@ -118,6 +164,7 @@ export function AddTransactionPage() {
           <div className="flex items-center justify-center gap-2 mb-4">
             <input
               type="number"
+              inputMode="decimal"
               step="0.01"
               min="0"
               value={amount}
@@ -147,21 +194,23 @@ export function AddTransactionPage() {
           </div>
 
           {/* Voice button */}
-          <div className="flex justify-center">
-            <motion.button
-              whileTap={{ scale: 0.9 }}
-              onClick={handleVoiceInput}
-              animate={isListening ? { scale: [1, 1.08, 1] } : {}}
-              transition={isListening ? { repeat: Infinity, duration: 0.8 } : {}}
-              className="flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-semibold haptic transition-all"
-              style={isListening
-                ? { background: '#FF4757', color: 'white', boxShadow: '0 4px 16px rgba(255,71,87,0.4)' }
-                : { background: accentBg, color: accentColor }
-              }
-            >
-              🎤 {isListening ? 'Слушаю...' : 'Голосовой ввод'}
-            </motion.button>
-          </div>
+          {voiceSupported && (
+            <div className="flex justify-center">
+              <motion.button
+                whileTap={{ scale: 0.9 }}
+                onClick={handleVoiceInput}
+                animate={isListening ? { scale: [1, 1.08, 1] } : { scale: 1 }}
+                transition={isListening ? { repeat: Infinity, duration: 0.8 } : { duration: 0.1 }}
+                className="flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-semibold haptic transition-all"
+                style={isListening
+                  ? { background: '#FF4757', color: 'white', boxShadow: '0 4px 16px rgba(255,71,87,0.4)' }
+                  : { background: accentBg, color: accentColor }
+                }
+              >
+                🎤 {isListening ? 'Слушаю...' : 'Голосовой ввод'}
+              </motion.button>
+            </div>
+          )}
 
           <AnimatePresence>
             {voiceText && (
@@ -175,6 +224,13 @@ export function AddTransactionPage() {
               </motion.div>
             )}
           </AnimatePresence>
+
+          {/* Voice hint */}
+          {voiceSupported && !isListening && !voiceText && (
+            <p className="text-center text-xs text-gray-400 mt-2">
+              Скажите: «потратил 500 рублей на кофе»
+            </p>
+          )}
         </div>
 
         {/* Categories */}
@@ -219,7 +275,7 @@ export function AddTransactionPage() {
         </div>
 
         {/* Submit */}
-        <div className="mx-4 mt-4 mb-6">
+        <div className="mx-4 mt-4 mb-8">
           <motion.button
             whileTap={{ scale: 0.97 }}
             onClick={handleSubmit}
