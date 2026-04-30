@@ -23,6 +23,8 @@ export function AddTransactionPage() {
   const [description, setDescription] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [voiceText, setVoiceText] = useState('');
+  // voiceBlocked: set true when service-not-allowed fires — hides button dynamically
+  const [voiceBlocked, setVoiceBlocked] = useState(false);
   const recognitionRef = useRef<any>(null);
 
   const categories = type === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
@@ -78,15 +80,15 @@ export function AddTransactionPage() {
     };
 
     recognition.onerror = (e: any) => {
-      console.error('Speech error:', e.error);
       setIsListening(false);
       setVoiceText('');
-      if (e.error === 'not-allowed') {
-        alert('Разрешите доступ к микрофону в настройках браузера');
+      if (e.error === 'service-not-allowed' || e.error === 'not-allowed') {
+        // Silently hide the voice button — WebView/browser doesn't permit it
+        setVoiceBlocked(true);
       } else if (e.error === 'no-speech') {
-        // silently ignore
+        // User didn't speak — ignore silently
       } else {
-        alert(`Ошибка голосового ввода: ${e.error}`);
+        console.warn('Voice recognition error:', e.error);
       }
     };
 
@@ -97,8 +99,9 @@ export function AddTransactionPage() {
     try {
       recognition.start();
     } catch (err) {
-      console.error('Recognition start error:', err);
+      console.warn('Recognition start error:', err);
       setIsListening(false);
+      setVoiceBlocked(true);
     }
   };
 
@@ -118,9 +121,13 @@ export function AddTransactionPage() {
   const accentColor = isExpense ? '#FF6B35' : '#00C896';
   const accentBg = isExpense ? '#FFF0EB' : '#E8FFF5';
 
+  // Only show voice button when: API exists AND page is in a secure context (HTTPS/localhost)
+  // Telegram WebView may have the API but block it — isSecureContext catches that
   const voiceSupported =
     typeof window !== 'undefined' &&
-    (!!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition);
+    !!window.isSecureContext &&
+    (!!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition) &&
+    !voiceBlocked;
 
   return (
     <div className="flex flex-col flex-1 min-h-0" style={{ background: 'var(--bg-warm)' }}>

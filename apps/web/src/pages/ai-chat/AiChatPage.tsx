@@ -12,24 +12,27 @@ const QUICK_PROMPTS = [
   { text: 'Советы по инвестициям', icon: '📈' },
 ];
 
-// Shared voice hook — fixed operator precedence for `supported`
+// Voice hook — checks isSecureContext to avoid service-not-allowed in Telegram WebView
 function useVoiceInput(onResult: (text: string) => void) {
   const [isListening, setIsListening] = useState(false);
   const [voiceText, setVoiceText] = useState('');
+  // voiceBlocked: set true when service-not-allowed fires — hides button dynamically
+  const [voiceBlocked, setVoiceBlocked] = useState(false);
   const recognitionRef = useRef<any>(null);
 
+  // Only show voice button when: API exists AND page is in a secure context (HTTPS/localhost)
+  // Telegram WebView may have the API but block it — isSecureContext catches that
   const supported =
     typeof window !== 'undefined' &&
-    (!!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition);
+    !!window.isSecureContext &&
+    (!!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition) &&
+    !voiceBlocked;
 
   const toggle = useCallback(() => {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
-    if (!SpeechRecognition) {
-      alert('Голосовой ввод не поддерживается в вашем браузере. Используйте Chrome или Safari.');
-      return;
-    }
+    if (!SpeechRecognition) return;
 
     if (isListening) {
       recognitionRef.current?.stop();
@@ -62,15 +65,15 @@ function useVoiceInput(onResult: (text: string) => void) {
     };
 
     recognition.onerror = (e: any) => {
-      console.error('Speech error:', e.error);
       setIsListening(false);
       setVoiceText('');
-      if (e.error === 'not-allowed') {
-        alert('Разрешите доступ к микрофону в настройках браузера');
+      if (e.error === 'service-not-allowed' || e.error === 'not-allowed') {
+        // Silently hide the voice button — WebView/browser doesn't permit it
+        setVoiceBlocked(true);
       } else if (e.error === 'no-speech') {
-        // silently ignore — user just didn't speak
+        // User didn't speak — ignore silently
       } else {
-        alert(`Ошибка голосового ввода: ${e.error}`);
+        console.warn('Voice recognition error:', e.error);
       }
     };
 
@@ -81,8 +84,9 @@ function useVoiceInput(onResult: (text: string) => void) {
     try {
       recognition.start();
     } catch (err) {
-      console.error('Recognition start error:', err);
+      console.warn('Recognition start error:', err);
       setIsListening(false);
+      setVoiceBlocked(true);
     }
   }, [isListening, onResult]);
 
@@ -100,7 +104,7 @@ export function AiChatPage() {
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const { aiMessages, addAiMessage, clearAiChat, transactions, goals, getMonthSummary, getCategorySpending } =
     useFinanceStore();
@@ -145,13 +149,6 @@ export function AiChatPage() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const hasMessages = aiMessages.length > 0;
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend(input);
-    }
-  };
 
   return (
     <div className="flex flex-col flex-1 min-h-0" style={{ background: '#F8F7FF' }}>
@@ -368,20 +365,26 @@ export function AiChatPage() {
             </motion.button>
           )}
 
-          {/* Text input */}
+          {/* Text input — textarea for better mobile/WebView compatibility */}
           <div
             className="flex-1 flex items-center rounded-2xl px-4 py-2.5 gap-2"
             style={{ background: 'rgba(108,99,255,0.06)', border: '1.5px solid rgba(108,99,255,0.15)' }}
           >
-            <input
-              ref={inputRef}
-              type="text"
+            <textarea
+              ref={textareaRef}
+              rows={1}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend(input);
+                }
+              }}
               placeholder={isListening ? 'Слушаю...' : 'Спроси что-нибудь...'}
-              disabled={isListening}
-              className="flex-1 bg-transparent outline-none text-sm text-gray-800 placeholder-gray-400 min-w-0"
+              readOnly={isListening}
+              className="flex-1 bg-transparent outline-none text-sm text-gray-800 placeholder-gray-400 min-w-0 resize-none leading-5"
+              style={{ maxHeight: '80px', overflowY: 'auto' }}
               autoComplete="off"
               autoCorrect="off"
               spellCheck={false}

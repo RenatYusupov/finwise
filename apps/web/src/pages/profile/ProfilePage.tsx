@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuthStore } from '@/features/auth/store';
 import { useFinanceStore } from '@/features/finance/store';
@@ -327,11 +327,248 @@ function BankConnectionModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+// ─── CSV / JSON File Import Modal ────────────────────────────────────────────
+
+type ImportResult = { imported: number; skipped: number; errors: string[] };
+
+function parseCSV(text: string): Array<Record<string, string>> {
+  const lines = text.trim().split(/\r?\n/);
+  if (lines.length < 2) return [];
+  const headers = lines[0]!.split(',').map((h) => h.trim().toLowerCase());
+  return lines.slice(1).map((line) => {
+    const values = line.split(',');
+    const row: Record<string, string> = {};
+    headers.forEach((h, i) => { row[h] = (values[i] ?? '').trim(); });
+    return row;
+  });
+}
+
+function rowToTransaction(row: Record<string, string>): { type: 'expense' | 'income'; amount: number; categoryId: string; description: string; date: string } | null {
+  const type = (row['type'] ?? row['тип'] ?? '').toLowerCase();
+  if (type !== 'expense' && type !== 'income' && type !== 'расход' && type !== 'доход') return null;
+  const normalizedType: 'expense' | 'income' = (type === 'расход') ? 'expense' : (type === 'доход') ? 'income' : type as 'expense' | 'income';
+  const amountRaw = row['amount'] ?? row['сумма'] ?? '';
+  const amount = parseFloat(amountRaw.replace(',', '.'));
+  if (!amount || amount <= 0) return null;
+  const categoryId = row['categoryid'] ?? row['category'] ?? row['категория'] ?? 'other';
+  const description = row['description'] ?? row['описание'] ?? row['comment'] ?? '';
+  const dateRaw = row['date'] ?? row['дата'] ?? '';
+  const date = dateRaw ? new Date(dateRaw).toISOString() : new Date().toISOString();
+  if (isNaN(new Date(date).getTime())) return null;
+  return { type: normalizedType, amount, categoryId, description, date };
+}
+
+function FileImportModal({ onClose }: { onClose: () => void }) {
+  const { addTransaction } = useFinanceStore();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [result, setResult] = useState<ImportResult | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+
+  const processFile = (file: File) => {
+    if (!file) return;
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    if (ext !== 'csv' && ext !== 'json') {
+      setResult({ imported: 0, skipped: 0, errors: ['Поддерживаются только файлы .csv и .json'] });
+      return;
+    }
+    setIsProcessing(true);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target?.result as string;
+      let rows: Array<Record<string, string>> = [];
+      const errors: string[] = [];
+      try {
+        if (ext === 'json') {
+          const parsed = JSON.parse(text);
+          const arr = Array.isArray(parsed) ? parsed : [parsed];
+          rows = arr.map((item: any) => {
+            const r: Record<string, string> = {};
+            Object.keys(item).forEach((k) => { r[k.toLowerCase()] = String(item[k] ?? ''); });
+            return r;
+          });
+        } else {
+          rows = parseCSV(text);
+        }
+      } catch {
+        errors.push('Ошибка разбора файла. Проверьте формат.');
+      }
+      let imported = 0;
+      let skipped = 0;
+      rows.forEach((row, i) => {
+        const tx = rowToTransaction(row);
+        if (tx) {
+          addTransaction(tx);
+          imported++;
+        } else {
+          skipped++;
+          if (errors.length < 3) errors.push(`Строка ${i + 2}: неверный формат`);
+        }
+      });
+      setResult({ imported, skipped, errors });
+      setIsProcessing(false);
+    };
+    reader.onerror = () => {
+      setResult({ imported: 0, skipped: 0, errors: ['Ошибка чтения файла'] });
+      setIsProcessing(false);
+    };
+    reader.readAsText(file, 'utf-8');
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) processFile(file);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) processFile(file);
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-50 flex items-end"
+      style={{ background: 'rgba(26,26,46,0.65)', backdropFilter: 'blur(6px)' }}
+      onClick={(e) => { if (e.target === e.currentTarget && !isProcessing) onClose(); }}
+    >
+      <motion.div
+        initial={{ y: '100%' }}
+        animate={{ y: 0 }}
+        exit={{ y: '100%' }}
+        transition={{ type: 'spring', damping: 28, stiffness: 320 }}
+        className="w-full bg-white rounded-t-3xl p-6 pb-8"
+        style={{ maxHeight: '85vh', overflowY: 'auto' }}
+      >
+        <div className="w-10 h-1 bg-gray-200 rounded-full mx-auto mb-5" />
+
+        {!result ? (
+          <>
+            <h2 className="text-xl font-bold text-gray-900 mb-1">📂 Импорт из файла</h2>
+            <p className="text-sm text-gray-400 mb-5">Загрузите CSV или JSON с транзакциями</p>
+
+            {/* Drop zone */}
+            <div
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={handleDrop}
+              onClick={() => fileInputRef.current?.click()}
+              className="border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all mb-4"
+              style={{
+                borderColor: dragOver ? '#6C63FF' : 'rgba(108,99,255,0.25)',
+                background: dragOver ? 'rgba(108,99,255,0.06)' : '#F8F7FF',
+              }}
+            >
+              {isProcessing ? (
+                <motion.div
+                  animate={{ rotate: 360 }}
+                  transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
+                  className="text-4xl mb-3 inline-block"
+                >
+                  ⚙️
+                </motion.div>
+              ) : (
+                <div className="text-4xl mb-3">📁</div>
+              )}
+              <div className="font-semibold text-gray-700 mb-1">
+                {isProcessing ? 'Обрабатываем...' : 'Нажмите или перетащите файл'}
+              </div>
+              <div className="text-xs text-gray-400">Поддерживаются .csv и .json</div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv,.json"
+                className="hidden"
+                onChange={handleFileChange}
+              />
+            </div>
+
+            {/* Format hint */}
+            <div className="rounded-2xl p-4 mb-4" style={{ background: '#F0EEFF' }}>
+              <div className="text-xs font-bold text-purple-700 mb-2">📋 Формат CSV</div>
+              <div className="text-xs text-purple-600 font-mono leading-relaxed">
+                date,type,amount,category,description<br />
+                2024-01-15,expense,1500,food,Продукты<br />
+                2024-01-16,income,85000,salary,Зарплата
+              </div>
+            </div>
+            <div className="rounded-2xl p-4" style={{ background: '#E8FFF5' }}>
+              <div className="text-xs font-bold text-green-700 mb-2">📋 Формат JSON</div>
+              <div className="text-xs text-green-600 font-mono leading-relaxed">
+                {'[{"type":"expense","amount":1500,'}<br />
+                {'  "categoryId":"food","date":"2024-01-15",'}<br />
+                {'  "description":"Продукты"}]'}
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="text-center py-4">
+            <motion.div
+              initial={{ scale: 0 }}
+              animate={{ scale: 1 }}
+              transition={{ type: 'spring', stiffness: 400, damping: 20 }}
+              className="text-6xl mb-4"
+            >
+              {result.imported > 0 ? '✅' : '⚠️'}
+            </motion.div>
+            <h3 className="text-xl font-bold text-gray-900 mb-2">
+              {result.imported > 0 ? 'Импорт завершён!' : 'Ничего не импортировано'}
+            </h3>
+            <div className="grid grid-cols-2 gap-2 mb-5">
+              <div className="rounded-2xl p-3 text-center" style={{ background: 'linear-gradient(135deg, #E8FFF5, #D0FFE8)' }}>
+                <div className="text-2xl font-bold text-green-600">{result.imported}</div>
+                <div className="text-xs text-green-500">Импортировано</div>
+              </div>
+              <div className="rounded-2xl p-3 text-center" style={{ background: 'linear-gradient(135deg, #FFF5F5, #FFE0E0)' }}>
+                <div className="text-2xl font-bold text-red-400">{result.skipped}</div>
+                <div className="text-xs text-red-400">Пропущено</div>
+              </div>
+            </div>
+            {result.errors.length > 0 && (
+              <div className="rounded-2xl p-3 mb-4 text-left" style={{ background: '#FFF8F0', border: '1px solid rgba(255,107,53,0.2)' }}>
+                <div className="text-xs font-bold text-orange-600 mb-1">⚠️ Предупреждения</div>
+                {result.errors.map((err, i) => (
+                  <div key={i} className="text-xs text-orange-500">{err}</div>
+                ))}
+              </div>
+            )}
+            <div className="flex gap-2">
+              <motion.button
+                whileTap={{ scale: 0.97 }}
+                onClick={() => { setResult(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
+                className="flex-1 py-3 rounded-2xl font-semibold text-sm haptic"
+                style={{ background: '#F0EEFF', color: '#6C63FF' }}
+              >
+                Ещё файл
+              </motion.button>
+              <motion.button
+                whileTap={{ scale: 0.97 }}
+                onClick={onClose}
+                className="flex-1 py-3 text-white rounded-2xl font-bold text-sm haptic"
+                style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}
+              >
+                Готово →
+              </motion.button>
+            </div>
+          </div>
+        )}
+      </motion.div>
+    </motion.div>
+  );
+}
+
+// ─── Profile Page ─────────────────────────────────────────────────────────────
+
 export function ProfilePage() {
   const { user, logout } = useAuthStore();
   const financeStore = useFinanceStore();
   const { streak, transactions, goals, getMonthSummary } = financeStore;
   const [showBankModal, setShowBankModal] = useState(false);
+  const [showFileModal, setShowFileModal] = useState(false);
 
   const summary = getMonthSummary();
   const unlockedAchievements = ACHIEVEMENTS.filter((a) => a.check(financeStore));
@@ -440,6 +677,7 @@ export function ProfilePage() {
         {[
           { icon: '🔔', label: 'Уведомления', action: () => alert('Уведомления настраиваются в Telegram') },
           { icon: '🏦', label: 'Банковские счета', action: () => setShowBankModal(true) },
+          { icon: '📂', label: 'Импорт из файла', action: () => setShowFileModal(true) },
           { icon: '🔒', label: 'Конфиденциальность', action: () => alert('Все данные хранятся локально на вашем устройстве') },
           { icon: '❓', label: 'Помощь', action: () => alert('Напишите нам: @finwise_support') },
         ].map((item, i) => (
@@ -468,6 +706,7 @@ export function ProfilePage() {
 
       <AnimatePresence>
         {showBankModal && <BankConnectionModal onClose={() => setShowBankModal(false)} />}
+        {showFileModal && <FileImportModal onClose={() => setShowFileModal(false)} />}
       </AnimatePresence>
     </div>
   );
