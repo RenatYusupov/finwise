@@ -8,7 +8,6 @@ import { TransactionsPage } from '@/pages/transactions/TransactionsPage';
 import { AddTransactionPage } from '@/pages/transactions/AddTransactionPage';
 import { AnalyticsPage } from '@/pages/analytics/AnalyticsPage';
 import { GoalsPage } from '@/pages/goals/GoalsPage';
-import { GoalDetailPage } from '@/pages/goals/GoalDetailPage';
 import { BudgetPage } from '@/pages/budget/BudgetPage';
 import { AiChatPage } from '@/pages/ai-chat/AiChatPage';
 import { ProfilePage } from '@/pages/profile/ProfilePage';
@@ -38,7 +37,6 @@ const router = createBrowserRouter(
         { path: 'transactions/add', element: <AddTransactionPage /> },
         { path: 'analytics', element: <AnalyticsPage /> },
         { path: 'goals', element: <GoalsPage /> },
-        { path: 'goals/:id', element: <GoalDetailPage /> },
         { path: 'budget', element: <BudgetPage /> },
         { path: 'ai', element: <AiChatPage /> },
         { path: 'profile', element: <ProfilePage /> },
@@ -52,7 +50,7 @@ function AppInner() {
   const { onboardingCompleted } = useAuthStore();
 
   useEffect(() => {
-    // Try to initialize Telegram WebApp if available
+    // Initialize Telegram WebApp if available
     if (window.Telegram?.WebApp) {
       window.Telegram.WebApp.ready();
       window.Telegram.WebApp.expand();
