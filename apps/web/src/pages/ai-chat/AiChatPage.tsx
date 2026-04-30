@@ -370,25 +370,30 @@ export function AiChatPage() {
           <div
             className="flex-1 flex items-center rounded-2xl px-4 py-2.5 gap-2"
             style={{ background: 'rgba(108,99,255,0.06)', border: '1.5px solid rgba(108,99,255,0.15)' }}
+            onClick={() => inputRef.current?.focus()}
           >
             <input
               ref={inputRef}
               type="text"
+              inputMode="text"
+              enterKeyHint="send"
               value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onInput={(e) => setInput((e.target as HTMLInputElement).value)}
+              onChange={(e) => {
+                if (!isListening) setInput(e.target.value);
+              }}
+              onInput={(e) => {
+                if (!isListening) setInput((e.target as HTMLInputElement).value);
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   e.preventDefault();
                   handleSend(input);
                 }
               }}
+              onClick={() => inputRef.current?.focus()}
               placeholder={isListening ? 'Слушаю...' : 'Спроси что-нибудь...'}
-              readOnly={isListening}
               className="flex-1 bg-transparent outline-none text-sm text-gray-800 placeholder-gray-400 min-w-0"
               autoComplete="off"
-              autoCorrect="off"
-              spellCheck={false}
             />
           </div>
 
