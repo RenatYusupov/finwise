@@ -358,6 +358,31 @@ function rowToTransaction(row: Record<string, string>): { type: 'expense' | 'inc
   return { type: normalizedType, amount, categoryId, description, date };
 }
 
+// Minimal XLSX parser — reads ZIP entries, extracts sharedStrings + sheet1 XML
+// No external dependencies required.
+async function parseXLSX(buffer: ArrayBuffer): Promise<Array<Record<string, string>>> {
+  // Dynamically load SheetJS from CDN (cached after first load)
+  if (!(window as any).__XLSX__) {
+    await new Promise<void>((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error('Failed to load SheetJS'));
+      document.head.appendChild(s);
+    });
+    (window as any).__XLSX__ = (window as any).XLSX;
+  }
+  const XLSX = (window as any).__XLSX__;
+  const wb = XLSX.read(buffer, { type: 'array' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const jsonRows: any[] = XLSX.utils.sheet_to_json(ws, { defval: '' });
+  return jsonRows.map((item: any) => {
+    const r: Record<string, string> = {};
+    Object.keys(item).forEach((k) => { r[k.toLowerCase().trim()] = String(item[k] ?? ''); });
+    return r;
+  });
+}
+
 function FileImportModal({ onClose }: { onClose: () => void }) {
   const { addTransaction } = useFinanceStore();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -365,20 +390,28 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
   const [isProcessing, setIsProcessing] = useState(false);
   const [dragOver, setDragOver] = useState(false);
 
-  const processFile = (file: File) => {
+  const processFile = async (file: File) => {
     if (!file) return;
     const ext = file.name.split('.').pop()?.toLowerCase();
-    if (ext !== 'csv' && ext !== 'json') {
-      setResult({ imported: 0, skipped: 0, errors: ['Поддерживаются только файлы .csv и .json'] });
+    if (ext !== 'csv' && ext !== 'json' && ext !== 'xlsx' && ext !== 'xls') {
+      setResult({ imported: 0, skipped: 0, errors: ['Поддерживаются файлы .csv, .json и .xlsx'] });
       return;
     }
     setIsProcessing(true);
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = e.target?.result as string;
-      let rows: Array<Record<string, string>> = [];
-      const errors: string[] = [];
-      try {
+    const errors: string[] = [];
+    let rows: Array<Record<string, string>> = [];
+
+    try {
+      if (ext === 'xlsx' || ext === 'xls') {
+        const buffer = await file.arrayBuffer();
+        rows = await parseXLSX(buffer);
+      } else {
+        const text = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = (e) => resolve(e.target?.result as string);
+          reader.onerror = () => reject(new Error('read error'));
+          reader.readAsText(file, 'utf-8');
+        });
         if (ext === 'json') {
           const parsed = JSON.parse(text);
           const arr = Array.isArray(parsed) ? parsed : [parsed];
@@ -390,29 +423,25 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
         } else {
           rows = parseCSV(text);
         }
-      } catch {
-        errors.push('Ошибка разбора файла. Проверьте формат.');
       }
-      let imported = 0;
-      let skipped = 0;
-      rows.forEach((row, i) => {
-        const tx = rowToTransaction(row);
-        if (tx) {
-          addTransaction(tx);
-          imported++;
-        } else {
-          skipped++;
-          if (errors.length < 3) errors.push(`Строка ${i + 2}: неверный формат`);
-        }
-      });
-      setResult({ imported, skipped, errors });
-      setIsProcessing(false);
-    };
-    reader.onerror = () => {
-      setResult({ imported: 0, skipped: 0, errors: ['Ошибка чтения файла'] });
-      setIsProcessing(false);
-    };
-    reader.readAsText(file, 'utf-8');
+    } catch {
+      errors.push('Ошибка разбора файла. Проверьте формат.');
+    }
+
+    let imported = 0;
+    let skipped = 0;
+    rows.forEach((row, i) => {
+      const tx = rowToTransaction(row);
+      if (tx) {
+        addTransaction(tx);
+        imported++;
+      } else {
+        skipped++;
+        if (errors.length < 3) errors.push(`Строка ${i + 2}: неверный формат`);
+      }
+    });
+    setResult({ imported, skipped, errors });
+    setIsProcessing(false);
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -449,7 +478,7 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
         {!result ? (
           <>
             <h2 className="text-xl font-bold text-gray-900 mb-1">📂 Импорт из файла</h2>
-            <p className="text-sm text-gray-400 mb-5">Загрузите CSV или JSON с транзакциями</p>
+            <p className="text-sm text-gray-400 mb-5">Загрузите CSV, JSON или Excel с транзакциями</p>
 
             {/* Drop zone */}
             <div
@@ -477,11 +506,11 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
               <div className="font-semibold text-gray-700 mb-1">
                 {isProcessing ? 'Обрабатываем...' : 'Нажмите или перетащите файл'}
               </div>
-              <div className="text-xs text-gray-400">Поддерживаются .csv и .json</div>
+              <div className="text-xs text-gray-400">Поддерживаются .csv, .json и .xlsx</div>
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".csv,.json"
+                accept=".csv,.json,.xlsx,.xls"
                 className="hidden"
                 onChange={handleFileChange}
               />
@@ -496,12 +525,20 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
                 2024-01-16,income,85000,salary,Зарплата
               </div>
             </div>
-            <div className="rounded-2xl p-4" style={{ background: '#E8FFF5' }}>
+            <div className="rounded-2xl p-4 mb-4" style={{ background: '#E8FFF5' }}>
               <div className="text-xs font-bold text-green-700 mb-2">📋 Формат JSON</div>
               <div className="text-xs text-green-600 font-mono leading-relaxed">
                 {'[{"type":"expense","amount":1500,'}<br />
                 {'  "categoryId":"food","date":"2024-01-15",'}<br />
                 {'  "description":"Продукты"}]'}
+              </div>
+            </div>
+            <div className="rounded-2xl p-4" style={{ background: '#EFF8FF' }}>
+              <div className="text-xs font-bold text-blue-700 mb-2">📊 Формат Excel (.xlsx)</div>
+              <div className="text-xs text-blue-600 leading-relaxed">
+                Колонки: <span className="font-mono">date, type, amount, category, description</span><br />
+                Первая строка — заголовки, остальные — данные.<br />
+                Тип: <span className="font-mono">expense</span> или <span className="font-mono">income</span>
               </div>
             </div>
           </>

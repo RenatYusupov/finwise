@@ -121,11 +121,12 @@ export function AddTransactionPage() {
   const accentColor = isExpense ? '#FF6B35' : '#00C896';
   const accentBg = isExpense ? '#FFF0EB' : '#E8FFF5';
 
-  // Only show voice button when: API exists AND page is in a secure context (HTTPS/localhost)
-  // Telegram WebView may have the API but block it — isSecureContext catches that
+  // Show voice button when: Speech API exists AND not blocked by a real error.
+  // NOTE: isSecureContext is intentionally NOT checked — it returns false in Telegram
+  // WebView even on HTTPS, which would hide the button unnecessarily. Instead we rely
+  // on the onerror handler to set voiceBlocked when the browser actually denies access.
   const voiceSupported =
     typeof window !== 'undefined' &&
-    !!window.isSecureContext &&
     (!!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition) &&
     !voiceBlocked;
 
