@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useAuthStore } from '@/features/auth/store';
 import { useFinanceStore } from '@/features/finance/store';
 import { formatCurrency } from '@/shared/utils/format';
+import { parseBankXLSX, parseCSV, rowToTransactionGeneric } from './bankImport';
+import type { ParsedBankTx } from './bankImport';
 
 const ACHIEVEMENTS = [
   { id: 'first_tx', icon: '🎯', name: 'Первая трата', desc: 'Добавь первую операцию', check: (s: any) => s.transactions.length >= 1 },
@@ -16,372 +18,9 @@ const ACHIEVEMENTS = [
   { id: 'big_saver', icon: '👑', name: 'Бриллиант', desc: 'Накопи 100 000 ₽', check: (s: any) => s.goals.some((g: any) => g.currentAmount >= 100000) },
 ];
 
-type MockTx = { type: 'expense' | 'income'; amount: number; categoryId: string; description: string; date: string };
+// ─── File Import Modal ────────────────────────────────────────────────────────
 
-function daysAgo(d: number): string {
-  const date = new Date();
-  date.setDate(date.getDate() - d);
-  return date.toISOString();
-}
-
-function generateMockTransactions(bankId: string): MockTx[] {
-  const sber: MockTx[] = [
-    { type: 'expense', amount: 4320, categoryId: 'food', description: 'Пятёрочка', date: daysAgo(0) },
-    { type: 'expense', amount: 890, categoryId: 'transport', description: 'Яндекс.Такси', date: daysAgo(1) },
-    { type: 'expense', amount: 2150, categoryId: 'food', description: 'ВкусВилл', date: daysAgo(2) },
-    { type: 'expense', amount: 650, categoryId: 'entertainment', description: 'Кофе Хауз', date: daysAgo(2) },
-    { type: 'income', amount: 85000, categoryId: 'salary', description: 'Зарплата', date: daysAgo(3) },
-    { type: 'expense', amount: 3200, categoryId: 'shopping', description: 'Wildberries', date: daysAgo(4) },
-    { type: 'expense', amount: 1890, categoryId: 'food', description: 'Перекрёсток', date: daysAgo(5) },
-    { type: 'expense', amount: 450, categoryId: 'transport', description: 'Метро', date: daysAgo(6) },
-    { type: 'expense', amount: 5600, categoryId: 'health', description: 'Аптека 36.6', date: daysAgo(7) },
-    { type: 'expense', amount: 12500, categoryId: 'housing', description: 'Коммунальные услуги', date: daysAgo(8) },
-    { type: 'expense', amount: 780, categoryId: 'entertainment', description: 'Яндекс Плюс', date: daysAgo(9) },
-    { type: 'expense', amount: 3400, categoryId: 'food', description: 'Магнит', date: daysAgo(10) },
-    { type: 'expense', amount: 1200, categoryId: 'transport', description: 'Яндекс.Такси', date: daysAgo(11) },
-    { type: 'expense', amount: 8900, categoryId: 'shopping', description: 'Ozon', date: daysAgo(12) },
-    { type: 'expense', amount: 2300, categoryId: 'food', description: 'Ресторан', date: daysAgo(13) },
-    { type: 'income', amount: 15000, categoryId: 'other_income', description: 'Фриланс', date: daysAgo(14) },
-    { type: 'expense', amount: 990, categoryId: 'entertainment', description: 'Кинотеатр', date: daysAgo(15) },
-    { type: 'expense', amount: 4100, categoryId: 'food', description: 'Лента', date: daysAgo(16) },
-    { type: 'expense', amount: 2800, categoryId: 'health', description: 'Фитнес-клуб', date: daysAgo(17) },
-    { type: 'expense', amount: 560, categoryId: 'transport', description: 'Метро', date: daysAgo(18) },
-    { type: 'expense', amount: 6700, categoryId: 'shopping', description: 'H&M', date: daysAgo(19) },
-    { type: 'expense', amount: 1450, categoryId: 'food', description: 'Кафе', date: daysAgo(20) },
-    { type: 'expense', amount: 3900, categoryId: 'food', description: 'Пятёрочка', date: daysAgo(21) },
-    { type: 'expense', amount: 750, categoryId: 'entertainment', description: 'Spotify', date: daysAgo(22) },
-    { type: 'expense', amount: 2100, categoryId: 'transport', description: 'Яндекс.Такси', date: daysAgo(23) },
-    { type: 'expense', amount: 15000, categoryId: 'housing', description: 'Аренда', date: daysAgo(24) },
-    { type: 'expense', amount: 3200, categoryId: 'food', description: 'ВкусВилл', date: daysAgo(25) },
-    { type: 'expense', amount: 890, categoryId: 'entertainment', description: 'Бар', date: daysAgo(26) },
-    { type: 'expense', amount: 4500, categoryId: 'shopping', description: 'Wildberries', date: daysAgo(27) },
-    { type: 'expense', amount: 1100, categoryId: 'food', description: 'Суши', date: daysAgo(28) },
-  ];
-
-  const tinkoff: MockTx[] = [
-    { type: 'expense', amount: 3890, categoryId: 'food', description: 'Перекрёсток', date: daysAgo(0) },
-    { type: 'expense', amount: 1200, categoryId: 'transport', description: 'Яндекс.Такси', date: daysAgo(1) },
-    { type: 'income', amount: 120000, categoryId: 'salary', description: 'Зарплата ООО Ромашка', date: daysAgo(2) },
-    { type: 'expense', amount: 5400, categoryId: 'shopping', description: 'Ozon', date: daysAgo(3) },
-    { type: 'expense', amount: 890, categoryId: 'entertainment', description: 'Нетфликс', date: daysAgo(4) },
-    { type: 'expense', amount: 2300, categoryId: 'food', description: 'Магнит', date: daysAgo(5) },
-    { type: 'expense', amount: 18000, categoryId: 'housing', description: 'Аренда квартиры', date: daysAgo(6) },
-    { type: 'expense', amount: 4200, categoryId: 'health', description: 'Стоматология', date: daysAgo(7) },
-    { type: 'expense', amount: 670, categoryId: 'transport', description: 'Метро', date: daysAgo(8) },
-    { type: 'expense', amount: 3100, categoryId: 'food', description: 'Ресторан', date: daysAgo(9) },
-    { type: 'expense', amount: 9800, categoryId: 'shopping', description: 'Zara', date: daysAgo(10) },
-    { type: 'expense', amount: 1890, categoryId: 'food', description: 'ВкусВилл', date: daysAgo(11) },
-    { type: 'income', amount: 25000, categoryId: 'other_income', description: 'Кэшбэк Т-Банк', date: daysAgo(12) },
-    { type: 'expense', amount: 560, categoryId: 'entertainment', description: 'Яндекс Музыка', date: daysAgo(13) },
-    { type: 'expense', amount: 3400, categoryId: 'food', description: 'Пятёрочка', date: daysAgo(14) },
-    { type: 'expense', amount: 2800, categoryId: 'health', description: 'Фитнес', date: daysAgo(15) },
-    { type: 'expense', amount: 1100, categoryId: 'transport', description: 'Такси', date: daysAgo(16) },
-    { type: 'expense', amount: 7200, categoryId: 'shopping', description: 'Wildberries', date: daysAgo(17) },
-    { type: 'expense', amount: 4500, categoryId: 'food', description: 'Лента', date: daysAgo(18) },
-    { type: 'expense', amount: 990, categoryId: 'entertainment', description: 'Кино', date: daysAgo(19) },
-    { type: 'expense', amount: 2100, categoryId: 'food', description: 'Кафе', date: daysAgo(20) },
-    { type: 'expense', amount: 12000, categoryId: 'housing', description: 'Коммуналка', date: daysAgo(21) },
-    { type: 'expense', amount: 3600, categoryId: 'food', description: 'Магнит', date: daysAgo(22) },
-    { type: 'expense', amount: 780, categoryId: 'transport', description: 'Метро', date: daysAgo(23) },
-    { type: 'expense', amount: 5100, categoryId: 'shopping', description: 'Ozon', date: daysAgo(24) },
-  ];
-
-  const vtb: MockTx[] = [
-    { type: 'income', amount: 95000, categoryId: 'salary', description: 'Зарплата', date: daysAgo(1) },
-    { type: 'expense', amount: 4100, categoryId: 'food', description: 'Ашан', date: daysAgo(2) },
-    { type: 'expense', amount: 1500, categoryId: 'transport', description: 'Яндекс.Такси', date: daysAgo(3) },
-    { type: 'expense', amount: 16000, categoryId: 'housing', description: 'Аренда', date: daysAgo(4) },
-    { type: 'expense', amount: 3200, categoryId: 'food', description: 'Перекрёсток', date: daysAgo(5) },
-    { type: 'expense', amount: 8900, categoryId: 'shopping', description: 'М.Видео', date: daysAgo(6) },
-    { type: 'expense', amount: 2400, categoryId: 'health', description: 'Аптека', date: daysAgo(7) },
-    { type: 'expense', amount: 890, categoryId: 'entertainment', description: 'Кинотеатр', date: daysAgo(8) },
-    { type: 'expense', amount: 3700, categoryId: 'food', description: 'Пятёрочка', date: daysAgo(9) },
-    { type: 'expense', amount: 5600, categoryId: 'shopping', description: 'Wildberries', date: daysAgo(10) },
-    { type: 'expense', amount: 1200, categoryId: 'transport', description: 'Метро', date: daysAgo(11) },
-    { type: 'expense', amount: 2900, categoryId: 'food', description: 'Ресторан', date: daysAgo(12) },
-    { type: 'income', amount: 10000, categoryId: 'other_income', description: 'Перевод', date: daysAgo(13) },
-    { type: 'expense', amount: 4300, categoryId: 'food', description: 'Магнит', date: daysAgo(14) },
-    { type: 'expense', amount: 780, categoryId: 'entertainment', description: 'Подписка', date: daysAgo(15) },
-    { type: 'expense', amount: 3100, categoryId: 'health', description: 'Фитнес', date: daysAgo(16) },
-    { type: 'expense', amount: 6700, categoryId: 'shopping', description: 'Ozon', date: daysAgo(17) },
-    { type: 'expense', amount: 1800, categoryId: 'food', description: 'ВкусВилл', date: daysAgo(18) },
-    { type: 'expense', amount: 11000, categoryId: 'housing', description: 'Коммуналка', date: daysAgo(19) },
-    { type: 'expense', amount: 2200, categoryId: 'transport', description: 'Такси', date: daysAgo(20) },
-  ];
-
-  const fallback: MockTx[] = [
-    { type: 'income', amount: 75000, categoryId: 'salary', description: 'Зарплата', date: daysAgo(2) },
-    { type: 'expense', amount: 3500, categoryId: 'food', description: 'Продукты', date: daysAgo(3) },
-    { type: 'expense', amount: 15000, categoryId: 'housing', description: 'Аренда', date: daysAgo(5) },
-    { type: 'expense', amount: 2100, categoryId: 'transport', description: 'Транспорт', date: daysAgo(7) },
-    { type: 'expense', amount: 4800, categoryId: 'shopping', description: 'Покупки', date: daysAgo(10) },
-    { type: 'expense', amount: 1200, categoryId: 'entertainment', description: 'Развлечения', date: daysAgo(12) },
-    { type: 'expense', amount: 3200, categoryId: 'food', description: 'Продукты', date: daysAgo(15) },
-    { type: 'expense', amount: 2800, categoryId: 'health', description: 'Здоровье', date: daysAgo(18) },
-    { type: 'expense', amount: 5600, categoryId: 'shopping', description: 'Одежда', date: daysAgo(22) },
-    { type: 'expense', amount: 1900, categoryId: 'food', description: 'Кафе', date: daysAgo(25) },
-  ];
-
-  const map: Record<string, MockTx[]> = { sber, tinkoff, vtb };
-  return map[bankId] ?? fallback;
-}
-
-const BANKS = [
-  { id: 'sber', name: 'Сбербанк', emoji: '🟢', color: '#21A038', txCount: 30 },
-  { id: 'tinkoff', name: 'Т-Банк', emoji: '🟡', color: '#FFDD2D', txCount: 25 },
-  { id: 'vtb', name: 'ВТБ', emoji: '🔵', color: '#009FDF', txCount: 20 },
-  { id: 'alfa', name: 'Альфа-Банк', emoji: '🔴', color: '#EF3124', txCount: 18 },
-  { id: 'raiffeisen', name: 'Райффайзен', emoji: '🟠', color: '#FFE600', txCount: 15 },
-  { id: 'ozon', name: 'Озон Банк', emoji: '🔷', color: '#005BFF', txCount: 12 },
-];
-
-type BankItem = typeof BANKS[0];
-type BankStep = 'list' | 'connecting' | 'importing' | 'success';
-
-function BankConnectionModal({ onClose }: { onClose: () => void }) {
-  const [step, setStep] = useState<BankStep>('list');
-  const [selectedBank, setSelectedBank] = useState<BankItem | null>(null);
-  const [progress, setProgress] = useState(0);
-  const [importedCount, setImportedCount] = useState(0);
-  const { addTransaction } = useFinanceStore();
-
-  const handleSelectBank = (bank: BankItem) => {
-    setSelectedBank(bank);
-    setStep('connecting');
-    setProgress(0);
-
-    let p = 0;
-    const connectTimer = setInterval(() => {
-      p += 8;
-      setProgress(Math.min(p, 40));
-      if (p >= 40) {
-        clearInterval(connectTimer);
-        setStep('importing');
-        let p2 = 40;
-        const importTimer = setInterval(() => {
-          p2 += 5;
-          setProgress(Math.min(p2, 100));
-          if (p2 >= 100) {
-            clearInterval(importTimer);
-            const txs = generateMockTransactions(bank.id);
-            txs.forEach((tx) => addTransaction(tx));
-            setImportedCount(txs.length);
-            setStep('success');
-          }
-        }, 80);
-      }
-    }, 60);
-  };
-
-  const canDismiss = step !== 'connecting' && step !== 'importing';
-
-  return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 z-50 flex items-end"
-      style={{ background: 'rgba(26,26,46,0.65)', backdropFilter: 'blur(6px)' }}
-      onClick={(e) => { if (e.target === e.currentTarget && canDismiss) onClose(); }}
-    >
-      <motion.div
-        initial={{ y: '100%' }}
-        animate={{ y: 0 }}
-        exit={{ y: '100%' }}
-        transition={{ type: 'spring', damping: 28, stiffness: 320 }}
-        className="w-full bg-white rounded-t-3xl p-6 pb-8"
-        style={{ maxHeight: '85vh', overflowY: 'auto' }}
-      >
-        <div className="w-10 h-1 bg-gray-200 rounded-full mx-auto mb-5" />
-
-        {step === 'list' && (
-          <>
-            <h2 className="text-xl font-bold text-gray-900 mb-1">🏦 Подключить банк</h2>
-            <p className="text-sm text-gray-400 mb-5">Импорт транзакций за последние 30 дней</p>
-            <div className="space-y-2">
-              {BANKS.map((bank) => (
-                <motion.button
-                  key={bank.id}
-                  whileTap={{ scale: 0.98 }}
-                  onClick={() => handleSelectBank(bank)}
-                  className="w-full flex items-center gap-4 p-4 rounded-2xl haptic"
-                  style={{ background: '#F8F7FF' }}
-                >
-                  <div className="w-11 h-11 rounded-xl bg-white shadow-sm flex items-center justify-center text-2xl flex-shrink-0">
-                    {bank.emoji}
-                  </div>
-                  <div className="flex-1 text-left">
-                    <div className="font-semibold text-gray-800">{bank.name}</div>
-                    <div className="text-xs text-gray-400">~{bank.txCount} операций за месяц</div>
-                  </div>
-                  <span className="text-gray-300 text-lg">›</span>
-                </motion.button>
-              ))}
-            </div>
-            <p className="text-xs text-gray-400 text-center mt-5">
-              🔒 Демо-режим · Используются тестовые данные
-            </p>
-          </>
-        )}
-
-        {(step === 'connecting' || step === 'importing') && selectedBank && (
-          <div className="text-center py-6">
-            <motion.div
-              animate={step === 'connecting' ? { rotate: 360 } : { scale: [1, 1.08, 1] }}
-              transition={
-                step === 'connecting'
-                  ? { repeat: Infinity, duration: 1.2, ease: 'linear' }
-                  : { repeat: Infinity, duration: 0.7 }
-              }
-              className="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl mx-auto mb-4 shadow-md"
-              style={{
-                background: selectedBank.color + '22',
-                border: '2px solid ' + selectedBank.color,
-              }}
-            >
-              {step === 'connecting' ? selectedBank.emoji : '📥'}
-            </motion.div>
-            <h3 className="text-lg font-bold text-gray-900 mb-1">
-              {step === 'connecting'
-                ? 'Подключение к ' + selectedBank.name
-                : 'Импортируем транзакции'}
-            </h3>
-            <p className="text-sm text-gray-400 mb-6">
-              {step === 'connecting'
-                ? 'Устанавливаем защищённое соединение...'
-                : 'Загружаем историю из ' + selectedBank.name + '...'}
-            </p>
-            <div className="w-full bg-gray-100 rounded-full h-2.5 mb-2 overflow-hidden">
-              <motion.div
-                className="h-2.5 rounded-full"
-                style={{
-                  background: 'linear-gradient(90deg, #6C63FF, #9B59B6)',
-                  width: progress + '%',
-                }}
-                transition={{ duration: 0.08 }}
-              />
-            </div>
-            <p className="text-xs text-gray-400">{progress}%</p>
-          </div>
-        )}
-
-        {step === 'success' && selectedBank && (
-          <div className="text-center py-4">
-            <motion.div
-              initial={{ scale: 0 }}
-              animate={{ scale: 1 }}
-              transition={{ type: 'spring', stiffness: 400, damping: 20 }}
-              className="text-6xl mb-4"
-            >
-              🎉
-            </motion.div>
-            <h3 className="text-xl font-bold text-gray-900 mb-2">Готово!</h3>
-            <p className="text-sm text-gray-500 mb-5">
-              Импортировано{' '}
-              <span className="font-bold text-purple-600">{importedCount} операций</span>{' '}
-              из {selectedBank.name}
-            </p>
-            <div className="grid grid-cols-3 gap-2 mb-5">
-              {[
-                { icon: '📥', label: 'Операций', value: String(importedCount) },
-                { icon: '📅', label: 'Дней', value: '30' },
-                { icon: '🏦', label: 'Банк', value: selectedBank.name.split(' ')[0] ?? selectedBank.name },
-              ].map((item) => (
-                <div
-                  key={item.label}
-                  className="rounded-2xl p-3 text-center"
-                  style={{ background: 'linear-gradient(135deg, #F0EEFF, #EDE8FF)' }}
-                >
-                  <div className="text-xl mb-1">{item.icon}</div>
-                  <div className="text-sm font-bold text-purple-700">{item.value}</div>
-                  <div className="text-xs text-purple-400">{item.label}</div>
-                </div>
-              ))}
-            </div>
-            <div
-              className="rounded-2xl p-4 mb-5 text-left"
-              style={{ background: '#F0FFF8', border: '1px solid rgba(0,200,150,0.2)' }}
-            >
-              <div className="text-sm font-bold text-green-700 mb-1">✅ Что импортировано</div>
-              <div className="text-xs text-green-600 leading-relaxed space-y-1">
-                <div>• Расходы: продукты, транспорт, развлечения, покупки</div>
-                <div>• Доходы: зарплата и прочие поступления</div>
-                <div>• Все операции за последние 30 дней</div>
-              </div>
-            </div>
-            <motion.button
-              whileTap={{ scale: 0.97 }}
-              onClick={onClose}
-              className="w-full py-4 text-white rounded-2xl font-bold text-base haptic"
-              style={{
-                background: 'linear-gradient(135deg, #6C63FF, #9B59B6)',
-                boxShadow: '0 4px 20px rgba(108,99,255,0.35)',
-              }}
-            >
-              Отлично! Смотреть аналитику →
-            </motion.button>
-          </div>
-        )}
-      </motion.div>
-    </motion.div>
-  );
-}
-
-// ─── CSV / JSON File Import Modal ────────────────────────────────────────────
-
-type ImportResult = { imported: number; skipped: number; errors: string[] };
-
-function parseCSV(text: string): Array<Record<string, string>> {
-  const lines = text.trim().split(/\r?\n/);
-  if (lines.length < 2) return [];
-  const headers = lines[0]!.split(',').map((h) => h.trim().toLowerCase());
-  return lines.slice(1).map((line) => {
-    const values = line.split(',');
-    const row: Record<string, string> = {};
-    headers.forEach((h, i) => { row[h] = (values[i] ?? '').trim(); });
-    return row;
-  });
-}
-
-function rowToTransaction(row: Record<string, string>): { type: 'expense' | 'income'; amount: number; categoryId: string; description: string; date: string } | null {
-  const type = (row['type'] ?? row['тип'] ?? '').toLowerCase();
-  if (type !== 'expense' && type !== 'income' && type !== 'расход' && type !== 'доход') return null;
-  const normalizedType: 'expense' | 'income' = (type === 'расход') ? 'expense' : (type === 'доход') ? 'income' : type as 'expense' | 'income';
-  const amountRaw = row['amount'] ?? row['сумма'] ?? '';
-  const amount = parseFloat(amountRaw.replace(',', '.'));
-  if (!amount || amount <= 0) return null;
-  const categoryId = row['categoryid'] ?? row['category'] ?? row['категория'] ?? 'other';
-  const description = row['description'] ?? row['описание'] ?? row['comment'] ?? '';
-  const dateRaw = row['date'] ?? row['дата'] ?? '';
-  const date = dateRaw ? new Date(dateRaw).toISOString() : new Date().toISOString();
-  if (isNaN(new Date(date).getTime())) return null;
-  return { type: normalizedType, amount, categoryId, description, date };
-}
-
-// Minimal XLSX parser — reads ZIP entries, extracts sharedStrings + sheet1 XML
-// No external dependencies required.
-async function parseXLSX(buffer: ArrayBuffer): Promise<Array<Record<string, string>>> {
-  // Dynamically load SheetJS from CDN (cached after first load)
-  if (!(window as any).__XLSX__) {
-    await new Promise<void>((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';
-      s.onload = () => resolve();
-      s.onerror = () => reject(new Error('Failed to load SheetJS'));
-      document.head.appendChild(s);
-    });
-    (window as any).__XLSX__ = (window as any).XLSX;
-  }
-  const XLSX = (window as any).__XLSX__;
-  const wb = XLSX.read(buffer, { type: 'array' });
-  const ws = wb.Sheets[wb.SheetNames[0]];
-  const jsonRows: any[] = XLSX.utils.sheet_to_json(ws, { defval: '' });
-  return jsonRows.map((item: any) => {
-    const r: Record<string, string> = {};
-    Object.keys(item).forEach((k) => { r[k.toLowerCase().trim()] = String(item[k] ?? ''); });
-    return r;
-  });
-}
+type ImportResult = { imported: number; skipped: number; errors: string[]; bankName?: string };
 
 function FileImportModal({ onClose }: { onClose: () => void }) {
   const { addTransaction } = useFinanceStore();
@@ -399,12 +38,17 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
     }
     setIsProcessing(true);
     const errors: string[] = [];
-    let rows: Array<Record<string, string>> = [];
 
     try {
       if (ext === 'xlsx' || ext === 'xls') {
         const buffer = await file.arrayBuffer();
-        rows = await parseXLSX(buffer);
+        const { transactions, bankName, skipped } = await parseBankXLSX(buffer);
+        let imported = 0;
+        transactions.forEach((tx: ParsedBankTx) => {
+          addTransaction(tx);
+          imported++;
+        });
+        setResult({ imported, skipped, errors, bankName });
       } else {
         const text = await new Promise<string>((resolve, reject) => {
           const reader = new FileReader();
@@ -412,6 +56,8 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
           reader.onerror = () => reject(new Error('read error'));
           reader.readAsText(file, 'utf-8');
         });
+
+        let rows: Array<Record<string, string>> = [];
         if (ext === 'json') {
           const parsed = JSON.parse(text);
           const arr = Array.isArray(parsed) ? parsed : [parsed];
@@ -423,24 +69,26 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
         } else {
           rows = parseCSV(text);
         }
+
+        let imported = 0;
+        let skipped = 0;
+        rows.forEach((row, i) => {
+          const tx = rowToTransactionGeneric(row);
+          if (tx) {
+            addTransaction(tx);
+            imported++;
+          } else {
+            skipped++;
+            if (errors.length < 3) errors.push(`Строка ${i + 2}: неверный формат`);
+          }
+        });
+        setResult({ imported, skipped, errors });
       }
-    } catch {
-      errors.push('Ошибка разбора файла. Проверьте формат.');
+    } catch (err) {
+      errors.push('Ошибка разбора файла: ' + (err instanceof Error ? err.message : 'неизвестная ошибка'));
+      setResult({ imported: 0, skipped: 0, errors });
     }
 
-    let imported = 0;
-    let skipped = 0;
-    rows.forEach((row, i) => {
-      const tx = rowToTransaction(row);
-      if (tx) {
-        addTransaction(tx);
-        imported++;
-      } else {
-        skipped++;
-        if (errors.length < 3) errors.push(`Строка ${i + 2}: неверный формат`);
-      }
-    });
-    setResult({ imported, skipped, errors });
     setIsProcessing(false);
   };
 
@@ -477,10 +125,9 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
 
         {!result ? (
           <>
-            <h2 className="text-xl font-bold text-gray-900 mb-1">📂 Импорт из файла</h2>
-            <p className="text-sm text-gray-400 mb-5">Загрузите CSV, JSON или Excel с транзакциями</p>
+            <h2 className="text-xl font-bold text-gray-900 mb-1">📂 Импорт выписки из банка</h2>
+            <p className="text-sm text-gray-400 mb-5">Загрузите выписку из мобильного банка (.xlsx)</p>
 
-            {/* Drop zone */}
             <div
               onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
               onDragLeave={() => setDragOver(false)}
@@ -504,9 +151,9 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
                 <div className="text-4xl mb-3">📁</div>
               )}
               <div className="font-semibold text-gray-700 mb-1">
-                {isProcessing ? 'Обрабатываем...' : 'Нажмите или перетащите файл'}
+                {isProcessing ? 'Анализируем транзакции...' : 'Нажмите или перетащите файл'}
               </div>
-              <div className="text-xs text-gray-400">Поддерживаются .csv, .json и .xlsx</div>
+              <div className="text-xs text-gray-400">Поддерживаются выписки Альфа-Банк, Сбер, Т-Банк, ВТБ (.xlsx)</div>
               <input
                 ref={fileInputRef}
                 type="file"
@@ -516,29 +163,20 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
               />
             </div>
 
-            {/* Format hint */}
-            <div className="rounded-2xl p-4 mb-4" style={{ background: '#F0EEFF' }}>
-              <div className="text-xs font-bold text-purple-700 mb-2">📋 Формат CSV</div>
-              <div className="text-xs text-purple-600 font-mono leading-relaxed">
-                date,type,amount,category,description<br />
-                2024-01-15,expense,1500,food,Продукты<br />
-                2024-01-16,income,85000,salary,Зарплата
+            <div className="rounded-2xl p-4 mb-3" style={{ background: '#F0EEFF' }}>
+              <div className="text-xs font-bold text-purple-700 mb-2">🏦 Как получить выписку</div>
+              <div className="text-xs text-purple-600 leading-relaxed space-y-1">
+                <div>1. Откройте мобильное приложение банка</div>
+                <div>2. Перейдите в раздел «Выписка» или «История»</div>
+                <div>3. Выберите период и формат Excel (.xlsx)</div>
+                <div>4. Скачайте файл и загрузите сюда</div>
               </div>
             </div>
-            <div className="rounded-2xl p-4 mb-4" style={{ background: '#E8FFF5' }}>
-              <div className="text-xs font-bold text-green-700 mb-2">📋 Формат JSON</div>
-              <div className="text-xs text-green-600 font-mono leading-relaxed">
-                {'[{"type":"expense","amount":1500,'}<br />
-                {'  "categoryId":"food","date":"2024-01-15",'}<br />
-                {'  "description":"Продукты"}]'}
-              </div>
-            </div>
-            <div className="rounded-2xl p-4" style={{ background: '#EFF8FF' }}>
-              <div className="text-xs font-bold text-blue-700 mb-2">📊 Формат Excel (.xlsx)</div>
-              <div className="text-xs text-blue-600 leading-relaxed">
-                Колонки: <span className="font-mono">date, type, amount, category, description</span><br />
-                Первая строка — заголовки, остальные — данные.<br />
-                Тип: <span className="font-mono">expense</span> или <span className="font-mono">income</span>
+
+            <div className="rounded-2xl p-4" style={{ background: '#E8FFF5' }}>
+              <div className="text-xs font-bold text-green-700 mb-2">🤖 AI-категоризация</div>
+              <div className="text-xs text-green-600 leading-relaxed">
+                Транзакции автоматически распределяются по категориям: еда, транспорт, покупки, развлечения и др. Внутренние переводы между счетами пропускаются.
               </div>
             </div>
           </>
@@ -550,11 +188,16 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
               transition={{ type: 'spring', stiffness: 400, damping: 20 }}
               className="text-6xl mb-4"
             >
-              {result.imported > 0 ? '✅' : '⚠️'}
+              {result.imported > 0 ? '🎉' : '⚠️'}
             </motion.div>
             <h3 className="text-xl font-bold text-gray-900 mb-2">
               {result.imported > 0 ? 'Импорт завершён!' : 'Ничего не импортировано'}
             </h3>
+            {result.bankName && (
+              <p className="text-sm text-purple-600 font-medium mb-3">
+                🏦 Распознан: {result.bankName}
+              </p>
+            )}
             <div className="grid grid-cols-2 gap-2 mb-5">
               <div className="rounded-2xl p-3 text-center" style={{ background: 'linear-gradient(135deg, #E8FFF5, #D0FFE8)' }}>
                 <div className="text-2xl font-bold text-green-600">{result.imported}</div>
@@ -565,6 +208,16 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
                 <div className="text-xs text-red-400">Пропущено</div>
               </div>
             </div>
+            {result.imported > 0 && (
+              <div className="rounded-2xl p-4 mb-4 text-left" style={{ background: '#F0FFF8', border: '1px solid rgba(0,200,150,0.2)' }}>
+                <div className="text-sm font-bold text-green-700 mb-1">✅ Что сделано</div>
+                <div className="text-xs text-green-600 leading-relaxed space-y-1">
+                  <div>• Транзакции распознаны и категоризированы AI</div>
+                  <div>• Внутренние переводы между счетами пропущены</div>
+                  <div>• Описания очищены от технических данных</div>
+                </div>
+              </div>
+            )}
             {result.errors.length > 0 && (
               <div className="rounded-2xl p-3 mb-4 text-left" style={{ background: '#FFF8F0', border: '1px solid rgba(255,107,53,0.2)' }}>
                 <div className="text-xs font-bold text-orange-600 mb-1">⚠️ Предупреждения</div>
@@ -604,7 +257,6 @@ export function ProfilePage() {
   const { user, logout } = useAuthStore();
   const financeStore = useFinanceStore();
   const { streak, transactions, goals, getMonthSummary } = financeStore;
-  const [showBankModal, setShowBankModal] = useState(false);
   const [showFileModal, setShowFileModal] = useState(false);
 
   const summary = getMonthSummary();
@@ -713,8 +365,7 @@ export function ProfilePage() {
       <div className="bg-white rounded-2xl overflow-hidden" style={{ boxShadow: 'var(--shadow-card)' }}>
         {[
           { icon: '🔔', label: 'Уведомления', action: () => alert('Уведомления настраиваются в Telegram') },
-          { icon: '🏦', label: 'Банковские счета', action: () => setShowBankModal(true) },
-          { icon: '📂', label: 'Импорт из файла', action: () => setShowFileModal(true) },
+          { icon: '📂', label: 'Импорт выписки из банка', action: () => setShowFileModal(true) },
           { icon: '🔒', label: 'Конфиденциальность', action: () => alert('Все данные хранятся локально на вашем устройстве') },
           { icon: '❓', label: 'Помощь', action: () => alert('Напишите нам: @finwise_support') },
         ].map((item, i) => (
@@ -742,7 +393,6 @@ export function ProfilePage() {
       </button>
 
       <AnimatePresence>
-        {showBankModal && <BankConnectionModal onClose={() => setShowBankModal(false)} />}
         {showFileModal && <FileImportModal onClose={() => setShowFileModal(false)} />}
       </AnimatePresence>
     </div>

@@ -30,7 +30,9 @@ function useVoiceInput(onResult: (text: string) => void) {
     typeof window !== 'undefined' &&
     (!!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition);
 
-  const supported = hasSpeechAPI && !voiceBlocked;
+  // In Telegram WebView, SpeechRecognition constructor may exist but always fails.
+  // Proactively hide voice button in Telegram WebView to avoid broken UX.
+  const supported = hasSpeechAPI && !voiceBlocked && !isTelegramWebView;
 
   const toggle = useCallback(() => {
     const SpeechRecognition =
