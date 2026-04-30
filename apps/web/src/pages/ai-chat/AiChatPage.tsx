@@ -4,10 +4,12 @@ import { useFinanceStore } from '@/features/finance/store';
 import { generateAiResponse } from '@/features/ai/smartResponses';
 
 const QUICK_PROMPTS = [
-  'Как я трачу деньги?',
-  'Где можно сэкономить?',
-  'Анализ за месяц',
-  'Помоги с бюджетом',
+  { text: 'Как я трачу деньги?', icon: '📊' },
+  { text: 'Где можно сэкономить?', icon: '💡' },
+  { text: 'Анализ за месяц', icon: '📅' },
+  { text: 'Помоги с бюджетом', icon: '🎯' },
+  { text: 'Как накопить быстрее?', icon: '🚀' },
+  { text: 'Советы по инвестициям', icon: '📈' },
 ];
 
 export function AiChatPage() {
@@ -24,14 +26,11 @@ export function AiChatPage() {
     if (!trimmed || isTyping) return;
     setInput('');
 
-    // Add user message
     addAiMessage({ role: 'user', content: trimmed });
 
-    // Simulate AI thinking
     setIsTyping(true);
-    await new Promise((r) => setTimeout(r, 800 + Math.random() * 700));
+    await new Promise((r) => setTimeout(r, 900 + Math.random() * 600));
 
-    // Generate smart response
     const summary = getMonthSummary();
     const categorySpending = getCategorySpending();
     const response = generateAiResponse(trimmed, { transactions, goals, summary, categorySpending });
@@ -44,40 +43,51 @@ export function AiChatPage() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [aiMessages, isTyping]);
 
-  // Send welcome message on first open
   useEffect(() => {
     if (aiMessages.length === 0) {
       setTimeout(() => {
         addAiMessage({
           role: 'assistant',
           content:
-            '🦉 Привет! Я твой финансовый советник FinWise.\n\nЯ анализирую твои доходы и расходы и даю персональные советы. Спроси меня что-нибудь!',
+            'Привет! Я FinWise — твой персональный финансовый советник 🦉\n\nЯ анализирую твои доходы и расходы в реальном времени и даю конкретные советы. Спроси меня что-нибудь!',
         });
-      }, 500);
+      }, 400);
     }
   }, []);
 
+  const hasMessages = aiMessages.length > 0;
+
   return (
-    <div className="flex flex-col flex-1 min-h-0 bg-gray-50">
+    <div className="flex flex-col flex-1 min-h-0" style={{ background: '#F8F7FF' }}>
       {/* Header */}
-      <div className="px-4 pt-6 pb-4 bg-white border-b border-gray-100">
+      <div className="px-4 pt-5 pb-4 glass border-b border-white/60">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center text-xl">
+            <motion.div
+              animate={{ scale: [1, 1.05, 1] }}
+              transition={{ repeat: Infinity, duration: 3 }}
+              className="w-11 h-11 rounded-2xl flex items-center justify-center text-2xl shadow-md"
+              style={{ background: 'linear-gradient(135deg, #6C63FF 0%, #9B59B6 100%)' }}
+            >
               🦉
-            </div>
+            </motion.div>
             <div>
-              <div className="font-bold text-gray-900">Финансовый советник</div>
-              <div className="text-xs text-green-500 flex items-center gap-1">
-                <span className="w-1.5 h-1.5 bg-green-500 rounded-full inline-block" />
-                Онлайн
+              <div className="font-bold text-gray-900">FinWise AI</div>
+              <div className="flex items-center gap-1.5">
+                <motion.div
+                  animate={{ opacity: [1, 0.4, 1] }}
+                  transition={{ repeat: Infinity, duration: 1.5 }}
+                  className="w-1.5 h-1.5 rounded-full bg-green-500"
+                />
+                <span className="text-xs text-green-600 font-medium">Онлайн · Анализирует ваши данные</span>
               </div>
             </div>
           </div>
-          {aiMessages.length > 0 && (
+          {hasMessages && (
             <button
               onClick={clearAiChat}
-              className="text-xs text-gray-400 px-3 py-1 rounded-full border border-gray-200 haptic"
+              className="text-xs text-gray-400 px-3 py-1.5 rounded-full haptic"
+              style={{ background: 'rgba(0,0,0,0.05)' }}
             >
               Очистить
             </button>
@@ -86,45 +96,68 @@ export function AiChatPage() {
       </div>
 
       {/* Messages */}
-      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-3">
-        {aiMessages.length === 0 && !isTyping && (
-          <div className="text-center py-8">
-            <div className="text-5xl mb-3">🦉</div>
-            <div className="font-semibold text-gray-700 mb-1">Привет! Я твой финансовый советник</div>
-            <div className="text-sm text-gray-400 mb-6">Задай любой вопрос о своих финансах</div>
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-4">
+        {/* Empty state with quick prompts */}
+        {!hasMessages && !isTyping && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="pt-4"
+          >
+            <div className="text-center mb-6">
+              <motion.div
+                animate={{ y: [0, -6, 0] }}
+                transition={{ repeat: Infinity, duration: 3 }}
+                className="text-6xl mb-3"
+              >
+                🦉
+              </motion.div>
+              <div className="font-bold text-gray-800 text-lg mb-1">Чем могу помочь?</div>
+              <div className="text-sm text-gray-500">Задай любой вопрос о своих финансах</div>
+            </div>
             <div className="grid grid-cols-2 gap-2">
-              {QUICK_PROMPTS.map((prompt) => (
-                <button
-                  key={prompt}
-                  onClick={() => handleSend(prompt)}
-                  className="bg-white border border-gray-200 rounded-xl px-3 py-2 text-sm text-gray-700 haptic text-left active:bg-gray-50"
+              {QUICK_PROMPTS.map((prompt, i) => (
+                <motion.button
+                  key={prompt.text}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: i * 0.07 }}
+                  onClick={() => handleSend(prompt.text)}
+                  className="flex items-center gap-2 bg-white rounded-2xl px-3 py-3 text-sm text-gray-700 haptic text-left shadow-sm border border-gray-100"
                 >
-                  {prompt}
-                </button>
+                  <span className="text-lg">{prompt.icon}</span>
+                  <span className="font-medium leading-tight">{prompt.text}</span>
+                </motion.button>
               ))}
             </div>
-          </div>
+          </motion.div>
         )}
 
         <AnimatePresence initial={false}>
           {aiMessages.map((msg) => (
             <motion.div
               key={msg.id}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+              initial={{ opacity: 0, y: 12, scale: 0.97 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              transition={{ type: 'spring', stiffness: 300, damping: 25 }}
+              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} items-end gap-2`}
             >
               {msg.role === 'assistant' && (
-                <div className="w-7 h-7 rounded-full bg-blue-100 flex items-center justify-center text-sm mr-2 mt-1 flex-shrink-0">
+                <div className="w-8 h-8 rounded-xl flex items-center justify-center text-base flex-shrink-0 mb-0.5"
+                  style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}>
                   🦉
                 </div>
               )}
               <div
-                className={`max-w-[82%] rounded-2xl px-4 py-3 text-sm whitespace-pre-line ${
+                className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm whitespace-pre-line leading-relaxed ${
                   msg.role === 'user'
-                    ? 'bg-blue-600 text-white rounded-br-sm'
-                    : 'bg-white text-gray-800 shadow-sm rounded-bl-sm'
+                    ? 'text-white rounded-br-sm'
+                    : 'text-gray-800 rounded-bl-sm shadow-sm'
                 }`}
+                style={msg.role === 'user'
+                  ? { background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }
+                  : { background: '#FFFFFF', border: '1px solid rgba(108,99,255,0.08)' }
+                }
               >
                 {msg.content}
               </div>
@@ -132,48 +165,61 @@ export function AiChatPage() {
           ))}
         </AnimatePresence>
 
+        {/* Typing indicator */}
         {isTyping && (
-          <div className="flex justify-start">
-            <div className="w-7 h-7 rounded-full bg-blue-100 flex items-center justify-center text-sm mr-2 flex-shrink-0">
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="flex items-end gap-2"
+          >
+            <div className="w-8 h-8 rounded-xl flex items-center justify-center text-base flex-shrink-0"
+              style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}>
               🦉
             </div>
-            <div className="bg-white rounded-2xl rounded-bl-sm px-4 py-3 shadow-sm">
+            <div className="bg-white rounded-2xl rounded-bl-sm px-4 py-3 shadow-sm border border-gray-100">
               <div className="flex gap-1 items-center h-4">
                 {[0, 1, 2].map((i) => (
                   <motion.div
                     key={i}
-                    animate={{ y: [0, -4, 0] }}
-                    transition={{ repeat: Infinity, duration: 0.6, delay: i * 0.15 }}
-                    className="w-2 h-2 bg-gray-400 rounded-full"
+                    animate={{ y: [0, -5, 0] }}
+                    transition={{ repeat: Infinity, duration: 0.7, delay: i * 0.15 }}
+                    className="w-2 h-2 rounded-full"
+                    style={{ background: '#6C63FF' }}
                   />
                 ))}
               </div>
             </div>
-          </div>
+          </motion.div>
         )}
 
-        {/* Quick prompts after first message */}
-        {aiMessages.length > 0 && !isTyping && (
-          <div className="flex flex-wrap gap-2 pt-2">
-            {QUICK_PROMPTS.map((prompt) => (
+        {/* Quick prompts after messages */}
+        {hasMessages && !isTyping && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="flex flex-wrap gap-2 pt-1"
+          >
+            {QUICK_PROMPTS.slice(0, 4).map((prompt) => (
               <button
-                key={prompt}
-                onClick={() => handleSend(prompt)}
-                className="bg-white border border-gray-200 rounded-full px-3 py-1.5 text-xs text-gray-600 haptic active:bg-gray-50"
+                key={prompt.text}
+                onClick={() => handleSend(prompt.text)}
+                className="flex items-center gap-1.5 bg-white rounded-full px-3 py-1.5 text-xs font-medium text-gray-600 haptic shadow-sm border border-gray-100"
               >
-                {prompt}
+                <span>{prompt.icon}</span>
+                <span>{prompt.text}</span>
               </button>
             ))}
-          </div>
+          </motion.div>
         )}
 
         <div ref={bottomRef} />
       </div>
 
       {/* Input */}
-      <div className="px-4 py-3 bg-white border-t border-gray-100 safe-bottom">
-        <div className="flex gap-2 items-end">
-          <div className="flex-1 bg-gray-100 rounded-2xl px-4 py-3 min-h-[44px] flex items-center">
+      <div className="px-4 py-3 glass border-t border-white/60 safe-bottom">
+        <div className="flex gap-2 items-center">
+          <div className="flex-1 flex items-center rounded-2xl px-4 py-2.5 gap-2"
+            style={{ background: 'rgba(108,99,255,0.06)', border: '1.5px solid rgba(108,99,255,0.15)' }}>
             <input
               ref={inputRef}
               type="text"
@@ -185,10 +231,11 @@ export function AiChatPage() {
             />
           </div>
           <motion.button
-            whileTap={{ scale: 0.9 }}
+            whileTap={{ scale: 0.88 }}
             onClick={() => handleSend(input)}
             disabled={!input.trim() || isTyping}
-            className="w-11 h-11 rounded-full bg-blue-600 text-white flex items-center justify-center haptic disabled:opacity-40 text-lg"
+            className="w-11 h-11 rounded-2xl text-white flex items-center justify-center haptic disabled:opacity-40 text-lg flex-shrink-0"
+            style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}
           >
             ↑
           </motion.button>

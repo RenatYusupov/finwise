@@ -12,7 +12,7 @@ export function AppLayout() {
   const isFullHeight = FULL_HEIGHT_PAGES.some((p) => location.pathname.startsWith(p));
 
   return (
-    <div className="flex flex-col h-full bg-gray-50">
+    <div className="flex flex-col h-full" style={{ background: 'var(--bg-warm)' }}>
       {/* Main content area */}
       <main
         className={`flex-1 min-h-0 ${isFullHeight ? 'flex flex-col overflow-hidden' : 'overflow-y-auto scroll-area pb-20'}`}
