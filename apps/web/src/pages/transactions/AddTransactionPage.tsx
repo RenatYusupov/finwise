@@ -100,7 +100,7 @@ export function AddTransactionPage() {
   };
 
   return (
-    <div className="flex flex-col h-full bg-gray-50">
+    <div className="flex flex-col flex-1 min-h-0 bg-gray-50">
       {/* Header */}
       <div className="flex items-center gap-3 px-4 pt-6 pb-4 bg-white border-b border-gray-100">
         <button

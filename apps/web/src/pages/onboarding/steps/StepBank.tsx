@@ -17,7 +17,7 @@ const BANKS = [
 
 export function StepBank({ updateData, onNext }: Props) {
   return (
-    <div className="flex flex-col px-6 py-8 pb-4" style={{ minHeight: '100%' }}>
+    <div className="flex flex-col px-6 py-8 pb-6 h-full">
       <div className="mb-6">
         <h2 className="text-2xl font-bold text-gray-900 mb-2">Подключи банк</h2>
         <p className="text-gray-500">Для автоматического учёта всех трат</p>
@@ -26,7 +26,7 @@ export function StepBank({ updateData, onNext }: Props) {
         </div>
       </div>
 
-      <div className="space-y-3">
+      <div className="space-y-3 flex-1">
         {BANKS.map((bank, i) => (
           <motion.button
             key={bank.id}
@@ -46,7 +46,7 @@ export function StepBank({ updateData, onNext }: Props) {
 
       <button
         onClick={onNext}
-        className="mt-6 w-full text-gray-400 text-sm py-3 haptic"
+        className="mt-6 w-full text-gray-400 text-sm py-3 haptic flex-shrink-0"
       >
         Пропустить — введу вручную
       </button>

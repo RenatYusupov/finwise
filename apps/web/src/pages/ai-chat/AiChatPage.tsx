@@ -58,7 +58,7 @@ export function AiChatPage() {
   }, []);
 
   return (
-    <div className="flex flex-col h-full bg-gray-50">
+    <div className="flex flex-col flex-1 min-h-0 bg-gray-50">
       {/* Header */}
       <div className="px-4 pt-6 pb-4 bg-white border-b border-gray-100">
         <div className="flex items-center justify-between">
@@ -86,7 +86,7 @@ export function AiChatPage() {
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-3">
         {aiMessages.length === 0 && !isTyping && (
           <div className="text-center py-8">
             <div className="text-5xl mb-3">🦉</div>
