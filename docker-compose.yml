@@ -1,0 +1,234 @@
+version: '3.9'
+
+services:
+  # ─── Infrastructure ──────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: finwise-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: finwise
+      POSTGRES_PASSWORD: finwise_secret
+      POSTGRES_DB: finwise
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U finwise']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: finwise-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass redis_secret
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-a', 'redis_secret', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Backend Services ─────────────────────────────────────────────────────────
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: services/auth-service/Dockerfile
+    container_name: finwise-auth
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://finwise:finwise_secret@postgres:5432/finwise
+      REDIS_URL: redis://:redis_secret@redis:6379
+      JWT_SECRET: ${JWT_SECRET:-super_secret_jwt_key_change_in_production}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      AUTH_SERVICE_PORT: 3001
+      NODE_ENV: ${NODE_ENV:-development}
+    ports:
+      - '3001:3001'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -f http://localhost:3001/health || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  finance-service:
+    build:
+      context: .
+      dockerfile: services/finance-service/Dockerfile
+    container_name: finwise-finance
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://finwise:finwise_secret@postgres:5432/finwise
+      REDIS_URL: redis://:redis_secret@redis:6379
+      JWT_SECRET: ${JWT_SECRET:-super_secret_jwt_key_change_in_production}
+      FINANCE_SERVICE_PORT: 3002
+      NODE_ENV: ${NODE_ENV:-development}
+    ports:
+      - '3002:3002'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -f http://localhost:3002/health || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  ai-service:
+    build:
+      context: .
+      dockerfile: services/ai-service/Dockerfile
+    container_name: finwise-ai
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://finwise:finwise_secret@postgres:5432/finwise
+      REDIS_URL: redis://:redis_secret@redis:6379
+      JWT_SECRET: ${JWT_SECRET:-super_secret_jwt_key_change_in_production}
+      YANDEX_GPT_API_KEY: ${YANDEX_GPT_API_KEY}
+      YANDEX_GPT_FOLDER_ID: ${YANDEX_GPT_FOLDER_ID}
+      AI_SERVICE_PORT: 3003
+      NODE_ENV: ${NODE_ENV:-development}
+    ports:
+      - '3003:3003'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -f http://localhost:3003/health || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: services/notification-service/Dockerfile
+    container_name: finwise-notifications
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://finwise:finwise_secret@postgres:5432/finwise
+      REDIS_URL: redis://:redis_secret@redis:6379
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      NOTIFICATION_SERVICE_PORT: 3004
+      NODE_ENV: ${NODE_ENV:-development}
+    ports:
+      - '3004:3004'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -f http://localhost:3004/health || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    container_name: finwise-gateway
+    restart: unless-stopped
+    environment:
+      AUTH_SERVICE_URL: http://auth-service:3001
+      FINANCE_SERVICE_URL: http://finance-service:3002
+      AI_SERVICE_URL: http://ai-service:3003
+      NOTIFICATION_SERVICE_URL: http://notification-service:3004
+      GATEWAY_PORT: 3000
+      NODE_ENV: ${NODE_ENV:-development}
+    ports:
+      - '3000:3000'
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      finance-service:
+        condition: service_healthy
+      ai-service:
+        condition: service_healthy
+      notification-service:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -f http://localhost:3000/health || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─── Telegram Bot ─────────────────────────────────────────────────────────────
+
+  bot:
+    build:
+      context: .
+      dockerfile: apps/bot/Dockerfile
+    container_name: finwise-bot
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://finwise:finwise_secret@postgres:5432/finwise
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      WEBAPP_URL: ${WEBAPP_URL:-https://your-finwise-app.com}
+      WEBHOOK_DOMAIN: ${WEBHOOK_DOMAIN}
+      WEBHOOK_PATH: /webhook
+      BOT_PORT: 3005
+      NODE_ENV: ${NODE_ENV:-development}
+    ports:
+      - '3005:3005'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ─── Frontend (for local dev preview) ────────────────────────────────────────
+
+  web:
+    build:
+      context: apps/web
+      dockerfile: Dockerfile
+    container_name: finwise-web
+    restart: unless-stopped
+    environment:
+      VITE_API_URL: http://localhost:3000
+    ports:
+      - '5173:80'
+    depends_on:
+      - api-gateway
+
+  # ─── DB Migrations ────────────────────────────────────────────────────────────
+
+  migrate:
+    build:
+      context: .
+      dockerfile: packages/db-schema/Dockerfile
+    container_name: finwise-migrate
+    environment:
+      DATABASE_URL: postgresql://finwise:finwise_secret@postgres:5432/finwise
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+    command: ['npx', 'prisma', 'migrate', 'deploy']
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  default:
+    name: finwise-network

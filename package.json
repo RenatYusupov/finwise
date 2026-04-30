@@ -1,0 +1,33 @@
+{
+  "name": "finwise",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FinWise — Telegram Mini App для личных финансов",
+  "scripts": {
+    "dev": "pnpm --parallel -r dev",
+    "build": "pnpm --parallel -r build",
+    "lint": "pnpm --parallel -r lint",
+    "typecheck": "pnpm --parallel -r typecheck",
+    "db:generate": "pnpm --filter @finwise/db-schema prisma generate",
+    "db:migrate": "pnpm --filter @finwise/db-schema prisma migrate dev",
+    "db:studio": "pnpm --filter @finwise/db-schema prisma studio",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down"
+  },
+  "workspaces": [
+    "apps/*",
+    "services/*",
+    "packages/*"
+  ],
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0",
+    "prettier": "^3.2.0",
+    "eslint": "^9.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@9.0.0"
+}

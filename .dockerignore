@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+**/dist
+**/.next
+**/.turbo
+**/.cache
+**/coverage
+**/*.log
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+README.md
+*.md

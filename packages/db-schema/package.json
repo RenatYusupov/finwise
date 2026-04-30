@@ -1,0 +1,21 @@
+{
+  "name": "@finwise/db-schema",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./generated/index.js",
+  "types": "./generated/index.d.ts",
+  "scripts": {
+    "generate": "prisma generate",
+    "migrate": "prisma migrate dev",
+    "migrate:prod": "prisma migrate deploy",
+    "studio": "prisma studio",
+    "seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.10.0"
+  },
+  "devDependencies": {
+    "prisma": "^5.10.0",
+    "tsx": "^4.7.0"
+  }
+}

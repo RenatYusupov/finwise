@@ -1,0 +1,281 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Users ─────────────────────────────────────────────────────────────────────
+
+model User {
+  id                 String   @id @default(cuid())
+  telegramId         BigInt   @unique
+  username           String?
+  firstName          String
+  lastName           String?
+  photoUrl           String?
+  languageCode       String   @default("ru")
+  onboardingCompleted Boolean @default(false)
+  monthlyIncome      Float?
+  incomeType         String?  @default("regular")
+  goalType           String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  accounts      Account[]
+  transactions  Transaction[]
+  goals         Goal[]
+  budgets       Budget[]
+  bankConnections BankConnection[]
+  aiMessages    AiMessage[]
+  aiInsights    AiInsight[]
+  streak        UserStreak?
+  achievements  UserAchievement[]
+  challenges    UserChallenge[]
+
+  @@map("users")
+}
+
+// ── Accounts ──────────────────────────────────────────────────────────────────
+
+model Account {
+  id           String   @id @default(cuid())
+  userId       String
+  name         String
+  type         String   // checking, savings, credit, cash, investment
+  currency     String   @default("RUB")
+  balance      Float    @default(0)
+  color        String?
+  icon         String?
+  isDefault    Boolean  @default(false)
+  bankId       String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+
+  @@map("accounts")
+}
+
+// ── Categories ────────────────────────────────────────────────────────────────
+
+model Category {
+  id           String   @id @default(cuid())
+  name         String
+  icon         String
+  color        String
+  type         String   // expense, income, both
+  isSystem     Boolean  @default(false)
+  userId       String?
+  parentId     String?
+  createdAt    DateTime @default(now())
+
+  parent       Category?     @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children     Category[]    @relation("CategoryHierarchy")
+  transactions Transaction[]
+  budgets      Budget[]
+
+  @@map("categories")
+}
+
+// ── Transactions ──────────────────────────────────────────────────────────────
+
+model Transaction {
+  id           String   @id @default(cuid())
+  userId       String
+  accountId    String
+  categoryId   String?
+  type         String   // income, expense, transfer
+  amount       Float
+  currency     String   @default("RUB")
+  description  String?
+  date         String   // YYYY-MM-DD
+  isRecurring  Boolean  @default(false)
+  recurringId  String?
+  bankTxId     String?  @unique
+  metadata     Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account      Account   @relation(fields: [accountId], references: [id])
+  category     Category? @relation(fields: [categoryId], references: [id])
+
+  @@index([userId, date])
+  @@index([userId, type])
+  @@map("transactions")
+}
+
+// ── Goals ─────────────────────────────────────────────────────────────────────
+
+model Goal {
+  id            String   @id @default(cuid())
+  userId        String
+  name          String
+  icon          String?
+  targetAmount  Float
+  currentAmount Float    @default(0)
+  currency      String   @default("RUB")
+  deadline      DateTime?
+  status        String   @default("active") // active, completed, paused, cancelled
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("goals")
+}
+
+// ── Budgets ───────────────────────────────────────────────────────────────────
+
+model Budget {
+  id         String   @id @default(cuid())
+  userId     String
+  categoryId String
+  amount     Float
+  spent      Float    @default(0)
+  period     String   @default("month") // month, week, year
+  startDate  String
+  endDate    String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category   Category @relation(fields: [categoryId], references: [id])
+
+  @@map("budgets")
+}
+
+// ── Bank Connections ──────────────────────────────────────────────────────────
+
+model BankConnection {
+  id           String   @id @default(cuid())
+  userId       String
+  bankId       String
+  bankName     String
+  accessToken  String   // AES-256-GCM encrypted
+  refreshToken String?  // AES-256-GCM encrypted
+  expiresAt    DateTime?
+  status       String   @default("active") // active, expired, revoked
+  lastSyncAt   DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("bank_connections")
+}
+
+// ── AI Messages ───────────────────────────────────────────────────────────────
+
+model AiMessage {
+  id        String   @id @default(cuid())
+  userId    String
+  role      String   // user, assistant
+  content   String
+  tokens    Int?
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("ai_messages")
+}
+
+// ── AI Insights ───────────────────────────────────────────────────────────────
+
+model AiInsight {
+  id          String   @id @default(cuid())
+  userId      String
+  type        String   // spending_alert, saving_tip, goal_progress, budget_warning
+  title       String
+  description String
+  priority    String   @default("medium") // high, medium, low
+  isRead      Boolean  @default(false)
+  expiresAt   DateTime?
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("ai_insights")
+}
+
+// ── Gamification ──────────────────────────────────────────────────────────────
+
+model UserStreak {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  currentStreak  Int      @default(0)
+  longestStreak  Int      @default(0)
+  lastActivityAt DateTime?
+  level          Int      @default(1)
+  xp             Int      @default(0)
+  updatedAt      DateTime @updatedAt
+
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_streaks")
+}
+
+model Achievement {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  name        String
+  description String
+  icon        String
+  xpReward    Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  userAchievements UserAchievement[]
+
+  @@map("achievements")
+}
+
+model UserAchievement {
+  id            String   @id @default(cuid())
+  userId        String
+  achievementId String
+  unlockedAt    DateTime @default(now())
+
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  achievement   Achievement @relation(fields: [achievementId], references: [id])
+
+  @@unique([userId, achievementId])
+  @@map("user_achievements")
+}
+
+model Challenge {
+  id          String   @id @default(cuid())
+  title       String
+  description String
+  icon        String
+  type        String   // daily, weekly, monthly
+  target      Float
+  xpReward    Int      @default(0)
+  startDate   DateTime
+  endDate     DateTime
+  createdAt   DateTime @default(now())
+
+  userChallenges UserChallenge[]
+
+  @@map("challenges")
+}
+
+model UserChallenge {
+  id          String   @id @default(cuid())
+  userId      String
+  challengeId String
+  progress    Float    @default(0)
+  completed   Boolean  @default(false)
+  completedAt DateTime?
+  createdAt   DateTime @default(now())
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  challenge   Challenge @relation(fields: [challengeId], references: [id])
+
+  @@unique([userId, challengeId])
+  @@map("user_challenges")
+}
