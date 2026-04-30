@@ -17,7 +17,7 @@ const BANKS = [
 
 export function StepBank({ updateData, onNext }: Props) {
   return (
-    <div className="flex flex-col px-6 py-8 pb-6 h-full">
+    <div className="px-6 py-8 pb-24">
       <div className="mb-6">
         <h2 className="text-2xl font-bold text-gray-900 mb-2">Подключи банк</h2>
         <p className="text-gray-500">Для автоматического учёта всех трат</p>
@@ -26,7 +26,7 @@ export function StepBank({ updateData, onNext }: Props) {
         </div>
       </div>
 
-      <div className="space-y-3 flex-1">
+      <div className="space-y-3">
         {BANKS.map((bank, i) => (
           <motion.button
             key={bank.id}
@@ -44,12 +44,15 @@ export function StepBank({ updateData, onNext }: Props) {
         ))}
       </div>
 
-      <button
-        onClick={onNext}
-        className="mt-6 w-full text-gray-400 text-sm py-3 haptic flex-shrink-0"
-      >
-        Пропустить — введу вручную
-      </button>
+      {/* Sticky skip button always visible at bottom */}
+      <div className="fixed bottom-0 left-0 right-0 px-6 pb-6 pt-3 bg-gradient-to-t from-white via-white to-transparent">
+        <button
+          onClick={onNext}
+          className="w-full text-gray-400 text-sm py-3 haptic bg-white rounded-2xl border border-gray-100"
+        >
+          Пропустить — введу вручную
+        </button>
+      </div>
     </div>
   );
 }
