@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useFinanceStore } from '@/features/finance/store';
 import { generateAiResponse } from '@/features/ai/smartResponses';
@@ -12,28 +13,34 @@ const QUICK_PROMPTS = [
   { text: 'Советы по инвестициям', icon: '📈' },
 ];
 
-// Voice hook — checks isSecureContext to avoid service-not-allowed in Telegram WebView
+// Detect Telegram WebView environment
+const isTelegramWebView =
+  typeof window !== 'undefined' &&
+  !!(window as any).Telegram?.WebApp;
+
+// Voice hook — robust for Telegram WebView
 function useVoiceInput(onResult: (text: string) => void) {
   const [isListening, setIsListening] = useState(false);
   const [voiceText, setVoiceText] = useState('');
-  // voiceBlocked: set true when service-not-allowed fires — hides button dynamically
   const [voiceBlocked, setVoiceBlocked] = useState(false);
+  const [voiceError, setVoiceError] = useState('');
   const recognitionRef = useRef<any>(null);
 
-  // Show voice button when: Speech API exists AND not blocked by a real error.
-  // NOTE: isSecureContext is intentionally NOT checked — it returns false in Telegram
-  // WebView even on HTTPS, which would hide the button unnecessarily. Instead we rely
-  // on the onerror handler to set voiceBlocked when the browser actually denies access.
-  const supported =
+  const hasSpeechAPI =
     typeof window !== 'undefined' &&
-    (!!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition) &&
-    !voiceBlocked;
+    (!!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition);
+
+  const supported = hasSpeechAPI && !voiceBlocked;
 
   const toggle = useCallback(() => {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
-    if (!SpeechRecognition) return;
+    if (!SpeechRecognition) {
+      setVoiceError('Голосовой ввод не поддерживается');
+      setTimeout(() => setVoiceError(''), 3000);
+      return;
+    }
 
     if (isListening) {
       recognitionRef.current?.stop();
@@ -41,6 +48,8 @@ function useVoiceInput(onResult: (text: string) => void) {
       setVoiceText('');
       return;
     }
+
+    setVoiceError('');
 
     const recognition = new SpeechRecognition();
     recognitionRef.current = recognition;
@@ -69,12 +78,21 @@ function useVoiceInput(onResult: (text: string) => void) {
       setIsListening(false);
       setVoiceText('');
       if (e.error === 'service-not-allowed' || e.error === 'not-allowed') {
-        // Silently hide the voice button — WebView/browser doesn't permit it
         setVoiceBlocked(true);
+        setVoiceError('Голосовой ввод недоступен в этом браузере');
+        setTimeout(() => setVoiceError(''), 4000);
       } else if (e.error === 'no-speech') {
-        // User didn't speak — ignore silently
+        setVoiceError('Речь не распознана, попробуйте ещё раз');
+        setTimeout(() => setVoiceError(''), 3000);
+      } else if (e.error === 'audio-capture') {
+        setVoiceError('Микрофон недоступен');
+        setTimeout(() => setVoiceError(''), 3000);
+      } else if (e.error === 'network') {
+        setVoiceError('Нет сети для распознавания речи');
+        setTimeout(() => setVoiceError(''), 3000);
       } else {
-        console.warn('Voice recognition error:', e.error);
+        setVoiceError('Ошибка голосового ввода');
+        setTimeout(() => setVoiceError(''), 3000);
       }
     };
 
@@ -84,21 +102,21 @@ function useVoiceInput(onResult: (text: string) => void) {
 
     try {
       recognition.start();
-    } catch (err) {
-      console.warn('Recognition start error:', err);
+    } catch {
       setIsListening(false);
       setVoiceBlocked(true);
+      setVoiceError('Не удалось запустить голосовой ввод');
+      setTimeout(() => setVoiceError(''), 3000);
     }
   }, [isListening, onResult]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       recognitionRef.current?.stop();
     };
   }, []);
 
-  return { isListening, voiceText, toggle, supported };
+  return { isListening, voiceText, voiceError, toggle, supported };
 }
 
 export function AiChatPage() {
@@ -106,6 +124,7 @@ export function AiChatPage() {
   const [isTyping, setIsTyping] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const navigate = useNavigate();
 
   const { aiMessages, addAiMessage, clearAiChat, transactions, goals, getMonthSummary, getCategorySpending } =
     useFinanceStore();
@@ -114,6 +133,8 @@ export function AiChatPage() {
     const trimmed = text.trim();
     if (!trimmed || isTyping) return;
     setInput('');
+    // Also clear the native input value directly (Telegram WebView workaround)
+    if (inputRef.current) inputRef.current.value = '';
 
     addAiMessage({ role: 'user', content: trimmed });
 
@@ -128,7 +149,13 @@ export function AiChatPage() {
     setIsTyping(false);
   }, [isTyping, addAiMessage, getMonthSummary, getCategorySpending, transactions, goals]);
 
-  const { isListening, voiceText, toggle: toggleVoice, supported: voiceSupported } = useVoiceInput((text) => {
+  // Read value directly from DOM — Telegram WebView may not update React state via onChange
+  const handleSendFromInput = useCallback(() => {
+    const val = inputRef.current?.value || input;
+    handleSend(val);
+  }, [handleSend, input]);
+
+  const { isListening, voiceText, voiceError, toggle: toggleVoice, supported: voiceSupported } = useVoiceInput((text) => {
     handleSend(text);
   });
 
@@ -142,12 +169,25 @@ export function AiChatPage() {
         addAiMessage({
           role: 'assistant',
           content:
-            'Привет! Я FinWise — твой персональный финансовый советник 🦉\n\nЯ анализирую твои доходы и расходы в реальном времени и даю конкретные советы. Спроси меня что-нибудь или нажми на микрофон!',
+            'Привет! Я FinWise — твой персональный финансовый советник 🦉\n\nЯ анализирую твои доходы и расходы в реальном времени и даю конкретные советы. Спроси меня что-нибудь!',
         });
       }, 400);
       return () => clearTimeout(timer);
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Telegram WebView: readonly trick to force keyboard to appear on focus
+  useEffect(() => {
+    if (isTelegramWebView && inputRef.current) {
+      const timer = setTimeout(() => {
+        inputRef.current?.setAttribute('readonly', '');
+        setTimeout(() => {
+          inputRef.current?.removeAttribute('readonly');
+        }, 100);
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, []);
 
   const hasMessages = aiMessages.length > 0;
 
@@ -157,6 +197,13 @@ export function AiChatPage() {
       <div className="flex-shrink-0 px-4 pt-5 pb-4 glass border-b border-white/60">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => navigate('/')}
+              className="w-9 h-9 rounded-2xl flex items-center justify-center haptic text-lg flex-shrink-0"
+              style={{ background: 'rgba(0,0,0,0.06)' }}
+            >
+              ←
+            </button>
             <motion.div
               animate={{ scale: [1, 1.05, 1] }}
               transition={{ repeat: Infinity, duration: 3 }}
@@ -173,7 +220,7 @@ export function AiChatPage() {
                   transition={{ repeat: Infinity, duration: 1.5 }}
                   className="w-1.5 h-1.5 rounded-full bg-green-500"
                 />
-                <span className="text-xs text-green-600 font-medium">Онлайн · Анализирует ваши данные</span>
+                <span className="text-xs text-green-600 font-medium">Онлайн</span>
               </div>
             </div>
           </div>
@@ -189,7 +236,7 @@ export function AiChatPage() {
         </div>
       </div>
 
-      {/* Messages area — flex-1 min-h-0 makes it scrollable */}
+      {/* Messages area */}
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-4">
         {/* Empty state */}
         {!hasMessages && !isTyping && (
@@ -326,8 +373,23 @@ export function AiChatPage() {
         <div ref={bottomRef} />
       </div>
 
-      {/* Input bar — flex-shrink-0 ensures it's ALWAYS visible, never scrolled away */}
-      <div className="flex-shrink-0 px-4 py-3 glass border-t border-white/60 safe-bottom">
+      {/* Input bar — no BottomNav overlap since nav is hidden on this page */}
+      <div className="flex-shrink-0 px-4 py-3 glass border-t border-white/60 safe-bottom" style={{ position: 'relative', zIndex: 10 }}>
+        {/* Voice error toast */}
+        <AnimatePresence>
+          {voiceError && (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+              className="mb-2 px-3 py-2 rounded-xl text-xs text-orange-700 font-medium"
+              style={{ background: 'rgba(255, 152, 0, 0.12)' }}
+            >
+              ⚠️ {voiceError}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* Listening indicator */}
         <AnimatePresence>
           {isListening && (
@@ -348,14 +410,11 @@ export function AiChatPage() {
         </AnimatePresence>
 
         <div className="flex gap-2 items-center">
-          {/* Voice button — only shown if supported */}
+          {/* Voice button */}
           {voiceSupported && (
-            <motion.button
-              whileTap={{ scale: 0.88 }}
+            <button
               onClick={toggleVoice}
-              animate={isListening ? { scale: [1, 1.1, 1] } : { scale: 1 }}
-              transition={isListening ? { repeat: Infinity, duration: 0.8 } : { duration: 0.1 }}
-              className="w-11 h-11 rounded-2xl flex items-center justify-center text-lg flex-shrink-0 haptic"
+              className="w-11 h-11 rounded-2xl flex items-center justify-center text-lg flex-shrink-0 active:scale-95 transition-transform"
               style={isListening
                 ? { background: '#FF4757', boxShadow: '0 4px 16px rgba(255,71,87,0.4)' }
                 : { background: 'rgba(108,99,255,0.1)' }
@@ -363,14 +422,22 @@ export function AiChatPage() {
               aria-label={isListening ? 'Остановить запись' : 'Голосовой ввод'}
             >
               🎤
-            </motion.button>
+            </button>
           )}
 
-          {/* Text input — plain <input> for maximum Telegram WebView compatibility */}
+          {/* Text input — using native DOM events for Telegram WebView compatibility */}
           <div
-            className="flex-1 flex items-center rounded-2xl px-4 py-2.5 gap-2"
-            style={{ background: 'rgba(108,99,255,0.06)', border: '1.5px solid rgba(108,99,255,0.15)' }}
-            onClick={() => inputRef.current?.focus()}
+            className="flex-1 flex items-center rounded-2xl px-4 gap-2"
+            style={{
+              background: 'rgba(108,99,255,0.06)',
+              border: '1.5px solid rgba(108,99,255,0.15)',
+              minHeight: '44px',
+            }}
+            onTouchEnd={(e) => {
+              // Telegram WebView: ensure input gets focus on touch
+              e.stopPropagation();
+              setTimeout(() => inputRef.current?.focus(), 10);
+            }}
           >
             <input
               ref={inputRef}
@@ -382,32 +449,52 @@ export function AiChatPage() {
                 if (!isListening) setInput(e.target.value);
               }}
               onInput={(e) => {
-                if (!isListening) setInput((e.target as HTMLInputElement).value);
+                // Fallback: some WebViews fire onInput but not onChange
+                if (!isListening) {
+                  const val = (e.target as HTMLInputElement).value;
+                  setInput(val);
+                }
               }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   e.preventDefault();
-                  handleSend(input);
+                  handleSendFromInput();
                 }
               }}
-              onClick={() => inputRef.current?.focus()}
+              onFocus={() => {
+                // Telegram WebView: scroll input into view when keyboard opens
+                setTimeout(() => {
+                  inputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }, 300);
+              }}
               placeholder={isListening ? 'Слушаю...' : 'Спроси что-нибудь...'}
-              className="flex-1 bg-transparent outline-none text-sm text-gray-800 placeholder-gray-400 min-w-0"
+              disabled={isListening}
+              className="flex-1 bg-transparent outline-none text-sm text-gray-800 placeholder-gray-400 min-w-0 py-2.5"
+              style={{
+                WebkitAppearance: 'none',
+                appearance: 'none',
+                border: 'none',
+                fontSize: '16px', // Prevents iOS zoom on focus
+                lineHeight: '1.4',
+                caretColor: '#6C63FF',
+              }}
               autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="sentences"
+              spellCheck={false}
             />
           </div>
 
           {/* Send button */}
-          <motion.button
-            whileTap={{ scale: 0.88 }}
-            onClick={() => handleSend(input)}
-            disabled={!input.trim() || isTyping}
-            className="w-11 h-11 rounded-2xl text-white flex items-center justify-center haptic disabled:opacity-40 text-lg flex-shrink-0"
+          <button
+            onClick={handleSendFromInput}
+            disabled={isTyping}
+            className="w-11 h-11 rounded-2xl text-white flex items-center justify-center disabled:opacity-40 text-lg flex-shrink-0 active:scale-95 transition-transform"
             style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}
             aria-label="Отправить"
           >
             ↑
-          </motion.button>
+          </button>
         </div>
       </div>
     </div>

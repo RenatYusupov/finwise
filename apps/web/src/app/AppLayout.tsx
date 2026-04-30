@@ -6,10 +6,13 @@ import { AddTransactionFab } from '@/shared/ui/AddTransactionFab';
 // Pages that need full-height flex layout (not scrollable wrapper)
 const FULL_HEIGHT_PAGES = ['/transactions/add', '/ai'];
 
+// Pages where BottomNav should be hidden (they have their own bottom UI)
+const HIDE_NAV_PAGES = ['/transactions/add', '/ai'];
+
 export function AppLayout() {
   const location = useLocation();
-  const isAddPage = location.pathname === '/transactions/add';
   const isFullHeight = FULL_HEIGHT_PAGES.some((p) => location.pathname.startsWith(p));
+  const hideNav = HIDE_NAV_PAGES.some((p) => location.pathname.startsWith(p));
 
   return (
     <div className="flex flex-col h-full" style={{ background: 'var(--bg-warm)' }}>
@@ -31,11 +34,11 @@ export function AppLayout() {
         </AnimatePresence>
       </main>
 
-      {/* FAB for adding transaction */}
-      {!isAddPage && <AddTransactionFab />}
+      {/* FAB for adding transaction — hidden on pages with own bottom UI */}
+      {!hideNav && <AddTransactionFab />}
 
-      {/* Bottom navigation */}
-      <BottomNav />
+      {/* Bottom navigation — hidden on pages with own bottom UI (AI chat, add transaction) */}
+      {!hideNav && <BottomNav />}
     </div>
   );
 }
