@@ -112,7 +112,13 @@ export const useFinanceStore = create<FinanceState>()(
       lastActiveDate: new Date().toISOString().split('T')[0] ?? '',
 
       addTransaction: (tx) => {
-        const category = getCategoryById(tx.categoryId);
+        const category = getCategoryById(tx.categoryId) ?? {
+          id: tx.categoryId,
+          name: tx.categoryId,
+          icon: '📦',
+          color: '#6B7280',
+          type: 'expense' as const,
+        };
         const newTx: Transaction = {
           ...tx,
           id: `tx_${Date.now()}_${Math.random().toString(36).slice(2)}`,

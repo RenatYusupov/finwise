@@ -37,7 +37,7 @@ export function StepFirstTransaction({ updateData, onNext }: Props) {
   };
 
   return (
-    <div className="flex flex-col h-full px-6 py-8">
+    <div className="flex flex-col px-6 py-8">
       <div className="mb-6">
         <h2 className="text-2xl font-bold text-gray-900 mb-2">Добавь последнюю трату</h2>
         <p className="text-gray-500">Займёт 10 секунд — обещаю!</p>
@@ -70,7 +70,7 @@ export function StepFirstTransaction({ updateData, onNext }: Props) {
           </button>
         ))}
       </div>
-      <div className="mt-auto space-y-3">
+      <div className="mt-6 space-y-3">
         <motion.button
           whileTap={{ scale: 0.97 }}
           onClick={handleNext}

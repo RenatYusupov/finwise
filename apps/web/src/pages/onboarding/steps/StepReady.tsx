@@ -32,7 +32,7 @@ export function StepReady({ onFinish, isLoading }: Props) {
   }, []);
 
   return (
-    <div className="flex flex-col items-center justify-center h-full px-6 py-10 text-center">
+    <div className="flex flex-col items-center justify-center min-h-[calc(100svh-80px)] px-6 py-10 text-center">
       <motion.div
         animate={{ scale: [1, 1.1, 1] }}
         transition={{ repeat: Infinity, duration: 2 }}

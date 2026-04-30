@@ -26,12 +26,12 @@ export function StepGoal({ data, updateData, onNext }: Props) {
   };
 
   return (
-    <div className="flex flex-col h-full px-6 py-8">
+    <div className="flex flex-col px-6 py-8">
       <div className="mb-8">
         <h2 className="text-2xl font-bold text-gray-900 mb-2">Какая твоя главная финансовая цель?</h2>
         <p className="text-gray-500">Это поможет мне давать точные советы</p>
       </div>
-      <div className="grid grid-cols-2 gap-3 flex-1">
+      <div className="grid grid-cols-2 gap-3">
         {GOALS.map((goal, i) => (
           <motion.button
             key={goal.type}

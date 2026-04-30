@@ -26,12 +26,12 @@ export function StepIncome({ data, updateData, onNext }: Props) {
   };
 
   return (
-    <div className="flex flex-col h-full px-6 py-8">
+    <div className="flex flex-col px-6 py-8">
       <div className="mb-6">
         <h2 className="text-2xl font-bold text-gray-900 mb-2">Сколько ты зарабатываешь?</h2>
         <p className="text-gray-500">Примерно — для точного планирования</p>
       </div>
-      <div className="space-y-3 flex-1">
+      <div className="space-y-3">
         {RANGES.map((range, i) => (
           <motion.button
             key={range.value}

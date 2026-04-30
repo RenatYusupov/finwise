@@ -12,7 +12,7 @@ const FEATURES = [
 
 export function StepWelcome({ onNext }: Props) {
   return (
-    <div className="flex flex-col items-center justify-between h-full px-6 py-10">
+    <div className="flex flex-col items-center justify-between min-h-[calc(100svh-80px)] px-6 py-10">
       {/* Mascot */}
       <div className="flex-1 flex flex-col items-center justify-center gap-6">
         <motion.div
