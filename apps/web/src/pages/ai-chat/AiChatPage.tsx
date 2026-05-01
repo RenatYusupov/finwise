@@ -30,8 +30,7 @@ function useVoiceInput(onResult: (text: string) => void) {
     typeof window !== 'undefined' &&
     (!!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition);
 
-  // In Telegram WebView, SpeechRecognition constructor may exist but always fails.
-  // Proactively hide voice button in Telegram WebView to avoid broken UX.
+  // In Telegram WebView, SpeechRecognition always fails — hide proactively
   const supported = hasSpeechAPI && !voiceBlocked && !isTelegramWebView;
 
   const toggle = useCallback(() => {
@@ -122,10 +121,13 @@ function useVoiceInput(onResult: (text: string) => void) {
 }
 
 export function AiChatPage() {
-  const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [inputHasText, setInputHasText] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  // UNCONTROLLED input — ref only, no React value state
+  // This bypasses React synthetic events that Telegram WebView breaks
   const inputRef = useRef<HTMLInputElement>(null);
+  const inputBarRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
 
   const { aiMessages, addAiMessage, clearAiChat, transactions, goals, getMonthSummary, getCategorySpending } =
@@ -134,9 +136,12 @@ export function AiChatPage() {
   const handleSend = useCallback(async (text: string) => {
     const trimmed = text.trim();
     if (!trimmed || isTyping) return;
-    setInput('');
-    // Also clear the native input value directly (Telegram WebView workaround)
-    if (inputRef.current) inputRef.current.value = '';
+
+    // Clear the native input directly — no React state needed
+    if (inputRef.current) {
+      inputRef.current.value = '';
+    }
+    setInputHasText(false);
 
     addAiMessage({ role: 'user', content: trimmed });
 
@@ -151,11 +156,11 @@ export function AiChatPage() {
     setIsTyping(false);
   }, [isTyping, addAiMessage, getMonthSummary, getCategorySpending, transactions, goals]);
 
-  // Read value directly from DOM — Telegram WebView may not update React state via onChange
+  // Read value directly from DOM — the only reliable method in Telegram WebView
   const handleSendFromInput = useCallback(() => {
-    const val = inputRef.current?.value || input;
+    const val = inputRef.current?.value ?? '';
     handleSend(val);
-  }, [handleSend, input]);
+  }, [handleSend]);
 
   const { isListening, voiceText, voiceError, toggle: toggleVoice, supported: voiceSupported } = useVoiceInput((text) => {
     handleSend(text);
@@ -178,23 +183,35 @@ export function AiChatPage() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Telegram WebView: readonly trick to force keyboard to appear on focus
+  // VisualViewport resize — push input bar above keyboard in Telegram WebView
   useEffect(() => {
-    if (isTelegramWebView && inputRef.current) {
-      const timer = setTimeout(() => {
-        inputRef.current?.setAttribute('readonly', '');
-        setTimeout(() => {
-          inputRef.current?.removeAttribute('readonly');
-        }, 100);
-      }, 300);
-      return () => clearTimeout(timer);
-    }
+    const vv = window.visualViewport;
+    if (!vv || !inputBarRef.current) return;
+
+    const onResize = () => {
+      if (!inputBarRef.current) return;
+      // When keyboard opens, visualViewport.height shrinks.
+      // Offset the input bar by the difference from window height.
+      const offsetFromBottom = window.innerHeight - vv.height - vv.offsetTop;
+      inputBarRef.current.style.transform = `translateY(-${Math.max(0, offsetFromBottom)}px)`;
+    };
+
+    vv.addEventListener('resize', onResize);
+    vv.addEventListener('scroll', onResize);
+
+    return () => {
+      vv.removeEventListener('resize', onResize);
+      vv.removeEventListener('scroll', onResize);
+    };
   }, []);
 
   const hasMessages = aiMessages.length > 0;
 
   return (
-    <div className="flex flex-col flex-1 min-h-0" style={{ background: '#F8F7FF' }}>
+    <div
+      className="flex flex-col flex-1 min-h-0"
+      style={{ background: '#F8F7FF', position: 'relative' }}
+    >
       {/* Header */}
       <div className="flex-shrink-0 px-4 pt-5 pb-4 glass border-b border-white/60">
         <div className="flex items-center justify-between">
@@ -238,7 +255,7 @@ export function AiChatPage() {
         </div>
       </div>
 
-      {/* Messages area */}
+      {/* Messages area — scrollable */}
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-4">
         {/* Empty state */}
         {!hasMessages && !isTyping && (
@@ -375,8 +392,20 @@ export function AiChatPage() {
         <div ref={bottomRef} />
       </div>
 
-      {/* Input bar — no BottomNav overlap since nav is hidden on this page */}
-      <div className="flex-shrink-0 px-4 py-3 glass border-t border-white/60 safe-bottom" style={{ position: 'relative', zIndex: 10 }}>
+      {/* Input bar — sticky bottom, lifted by visualViewport when keyboard opens */}
+      <div
+        ref={inputBarRef}
+        className="flex-shrink-0 glass border-t border-white/60"
+        style={{
+          position: 'relative',
+          zIndex: 10,
+          paddingLeft: '16px',
+          paddingRight: '16px',
+          paddingTop: '12px',
+          paddingBottom: `calc(12px + env(safe-area-inset-bottom, 0px))`,
+          willChange: 'transform',
+        }}
+      >
         {/* Voice error toast */}
         <AnimatePresence>
           {voiceError && (
@@ -427,7 +456,7 @@ export function AiChatPage() {
             </button>
           )}
 
-          {/* Text input — using native DOM events for Telegram WebView compatibility */}
+          {/* Text input — UNCONTROLLED, native DOM only for Telegram WebView compatibility */}
           <div
             className="flex-1 flex items-center rounded-2xl px-4 gap-2"
             style={{
@@ -435,27 +464,17 @@ export function AiChatPage() {
               border: '1.5px solid rgba(108,99,255,0.15)',
               minHeight: '44px',
             }}
-            onTouchEnd={(e) => {
-              // Telegram WebView: ensure input gets focus on touch
-              e.stopPropagation();
-              setTimeout(() => inputRef.current?.focus(), 10);
-            }}
           >
             <input
               ref={inputRef}
               type="text"
               inputMode="text"
               enterKeyHint="send"
-              value={input}
-              onChange={(e) => {
-                if (!isListening) setInput(e.target.value);
-              }}
+              // UNCONTROLLED: no value/onChange — Telegram WebView breaks React synthetic events
+              defaultValue=""
               onInput={(e) => {
-                // Fallback: some WebViews fire onInput but not onChange
-                if (!isListening) {
-                  const val = (e.target as HTMLInputElement).value;
-                  setInput(val);
-                }
+                // Track whether there's text for send button state
+                setInputHasText((e.target as HTMLInputElement).value.length > 0);
               }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
@@ -464,14 +483,14 @@ export function AiChatPage() {
                 }
               }}
               onFocus={() => {
-                // Telegram WebView: scroll input into view when keyboard opens
+                // Scroll messages to bottom when keyboard opens
                 setTimeout(() => {
-                  inputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }, 300);
+                  bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+                }, 350);
               }}
               placeholder={isListening ? 'Слушаю...' : 'Спроси что-нибудь...'}
               disabled={isListening}
-              className="flex-1 bg-transparent outline-none text-sm text-gray-800 placeholder-gray-400 min-w-0 py-2.5"
+              className="flex-1 bg-transparent outline-none text-gray-800 placeholder-gray-400 min-w-0 py-2.5"
               style={{
                 WebkitAppearance: 'none',
                 appearance: 'none',
