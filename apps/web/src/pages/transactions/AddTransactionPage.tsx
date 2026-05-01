@@ -1,18 +1,122 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useFinanceStore, EXPENSE_CATEGORIES, INCOME_CATEGORIES, type TransactionType } from '@/features/finance/store';
 
-// Parse voice input like "потратил 500 рублей на кофе"
-function parseVoiceInput(text: string): { amount: number | undefined; description: string | undefined } {
-  const amountMatch = text.match(/(\d+(?:[.,]\d+)?)\s*(?:рублей|рубля|руб|₽|р\.?)?/i);
-  const amount = amountMatch ? parseFloat(amountMatch[1]!.replace(',', '.')) : undefined;
-  const description = text
-    .replace(/(\d+(?:[.,]\d+)?)\s*(?:рублей|рубля|руб|₽|р\.?)?/gi, '')
-    .replace(/(?:потратил|потратила|заплатил|заплатила|купил|купила|на|за|в|у)\s*/gi, '')
-    .trim();
-  return { amount, description: description || undefined };
+// ─── AI multi-transaction parser ────────────────────────────────────────────
+
+interface ParsedTx {
+  type: TransactionType;
+  amount: number;
+  categoryId: string;
+  description: string;
 }
+
+const EXPENSE_KEYWORDS: Record<string, string[]> = {
+  food: ['еда', 'продукт', 'магазин', 'супермаркет', 'пятёрочка', 'пятерочка', 'перекрёсток', 'перекресток', 'лента', 'ашан', 'вкусвилл', 'дикси', 'магнит', 'окей', 'о\'кей'],
+  cafe: ['кофе', 'кафе', 'ресторан', 'бар', 'пицца', 'суши', 'бургер', 'фастфуд', 'старбакс', 'шаурма', 'обед', 'ужин', 'завтрак', 'перекус'],
+  transport: ['метро', 'автобус', 'такси', 'убер', 'яндекс такси', 'каршеринг', 'бензин', 'заправка', 'парковка', 'электричка', 'трамвай', 'троллейбус'],
+  shopping: ['одежда', 'обувь', 'магазин', 'покупка', 'зара', 'h&m', 'wildberries', 'озон', 'ozon', 'wb', 'маркетплейс'],
+  health: ['аптека', 'лекарство', 'врач', 'больница', 'клиника', 'анализ', 'таблетки', 'витамины'],
+  entertainment: ['кино', 'театр', 'концерт', 'игра', 'подписка', 'нетфликс', 'netflix', 'spotify', 'стриминг'],
+  sport: ['спортзал', 'фитнес', 'тренировка', 'бассейн', 'йога', 'спорт'],
+  home: ['квартира', 'аренда', 'коммуналка', 'жкх', 'интернет', 'телефон', 'ремонт', 'мебель', 'икеа'],
+  beauty: ['салон', 'парикмахер', 'маникюр', 'косметика', 'уход'],
+  education: ['курс', 'обучение', 'книга', 'учёба', 'университет', 'школа'],
+  travel: ['отель', 'гостиница', 'авиа', 'билет', 'путешествие', 'туризм', 'airbnb'],
+};
+
+const INCOME_KEYWORDS: string[] = ['зарплата', 'аванс', 'премия', 'доход', 'получил', 'получила', 'заработал', 'заработала', 'фриланс', 'подработка', 'перевод', 'возврат', 'кэшбэк'];
+
+function detectCategoryFromText(text: string): string {
+  const lower = text.toLowerCase();
+  for (const [catId, keywords] of Object.entries(EXPENSE_KEYWORDS)) {
+    if (keywords.some((kw) => lower.includes(kw))) return catId;
+  }
+  return 'other_exp';
+}
+
+function detectTypeFromText(text: string): TransactionType {
+  const lower = text.toLowerCase();
+  if (INCOME_KEYWORDS.some((kw) => lower.includes(kw))) return 'income';
+  return 'expense';
+}
+
+function detectIncomeCategoryFromText(text: string): string {
+  const lower = text.toLowerCase();
+  if (lower.includes('зарплат') || lower.includes('аванс')) return 'salary';
+  if (lower.includes('фриланс') || lower.includes('подработ')) return 'freelance';
+  if (lower.includes('кэшбэк') || lower.includes('cashback')) return 'cashback';
+  if (lower.includes('возврат')) return 'cashback';
+  if (lower.includes('подарок') || lower.includes('подарили')) return 'gift';
+  return 'other_inc';
+}
+
+/**
+ * Parse a free-form Russian text into one or multiple transactions.
+ * Handles patterns like:
+ *   "потратил 500 на кофе и 200 на метро"
+ *   "купил продукты на 1500 и заплатил за такси 350"
+ *   "зарплата 80000"
+ */
+function parseVoiceToTransactions(text: string): ParsedTx[] {
+  const results: ParsedTx[] = [];
+
+  // Split on conjunctions / separators to find multiple items
+  // e.g. "500 на кофе и 200 на метро" → ["500 на кофе", "200 на метро"]
+  const segments = text
+    .split(/\s+(?:и|а также|плюс|ещё|еще|,|;)\s+/i)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  for (const segment of segments) {
+    // Find amount: digits optionally followed by currency words
+    const amountMatch = segment.match(/(\d[\d\s]*(?:[.,]\d+)?)\s*(?:рублей|рубля|руб|₽|р\.?|тысяч|тыс\.?|к\b)?/i);
+    if (!amountMatch) continue;
+
+    let amount = parseFloat(amountMatch[1]!.replace(/\s/g, '').replace(',', '.'));
+    if (!amount || amount <= 0) continue;
+
+    // Handle "тысяч/тыс/к" multiplier
+    if (/тысяч|тыс\.?|к\b/i.test(amountMatch[0]!)) amount *= 1000;
+
+    const type = detectTypeFromText(segment);
+    const categoryId = type === 'income'
+      ? detectIncomeCategoryFromText(segment)
+      : detectCategoryFromText(segment);
+
+    // Extract description: remove amount + currency + filler words
+    const description = segment
+      .replace(/(\d[\d\s]*(?:[.,]\d+)?)\s*(?:рублей|рубля|руб|₽|р\.?|тысяч|тыс\.?|к\b)?/gi, '')
+      .replace(/^(?:потратил|потратила|заплатил|заплатила|купил|купила|оплатил|оплатила|потрачено|на|за|в|у|по)\s+/gi, '')
+      .replace(/\s+(?:на|за|в|у|по)\s+/gi, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+
+    results.push({ type, amount, categoryId, description: description || segment.trim() });
+  }
+
+  // Fallback: if nothing parsed, try the whole text as one transaction
+  if (results.length === 0) {
+    const amountMatch = text.match(/(\d[\d\s]*(?:[.,]\d+)?)/);
+    if (amountMatch) {
+      const amount = parseFloat(amountMatch[1]!.replace(/\s/g, '').replace(',', '.'));
+      if (amount > 0) {
+        const type = detectTypeFromText(text);
+        results.push({
+          type,
+          amount,
+          categoryId: type === 'income' ? detectIncomeCategoryFromText(text) : detectCategoryFromText(text),
+          description: text.replace(/\d[\d\s]*(?:[.,]\d+)?/g, '').replace(/рублей|рубля|руб|₽|р\./gi, '').trim(),
+        });
+      }
+    }
+  }
+
+  return results;
+}
+
+// ─── Component ───────────────────────────────────────────────────────────────
 
 export function AddTransactionPage() {
   const navigate = useNavigate();
@@ -21,89 +125,17 @@ export function AddTransactionPage() {
   const [selectedCategory, setSelectedCategory] = useState<string>('');
   const [amount, setAmount] = useState('');
   const [description, setDescription] = useState('');
-  const [isListening, setIsListening] = useState(false);
-  const [voiceText, setVoiceText] = useState('');
-  // voiceBlocked: set true when service-not-allowed fires — hides button dynamically
-  const [voiceBlocked, setVoiceBlocked] = useState(false);
-  const recognitionRef = useRef<any>(null);
+
+  // Voice dictation mode
+  const [dictateMode, setDictateMode] = useState(false);
+  const [dictateText, setDictateText] = useState('');
+  const [parsedTxs, setParsedTxs] = useState<ParsedTx[] | null>(null);
+  const dictateRef = useRef<HTMLTextAreaElement>(null);
 
   const categories = type === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
   const isExpense = type === 'expense';
-
-  // Cleanup recognition on unmount
-  useEffect(() => {
-    return () => {
-      recognitionRef.current?.stop();
-    };
-  }, []);
-
-  const handleVoiceInput = () => {
-    const SpeechRecognition =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-
-    if (!SpeechRecognition) {
-      alert('Голосовой ввод не поддерживается в вашем браузере. Используйте Chrome или Safari.');
-      return;
-    }
-
-    if (isListening) {
-      recognitionRef.current?.stop();
-      setIsListening(false);
-      setVoiceText('');
-      return;
-    }
-
-    const recognition = new SpeechRecognition();
-    recognitionRef.current = recognition;
-    recognition.lang = 'ru-RU';
-    recognition.continuous = false;
-    recognition.interimResults = true;
-    recognition.maxAlternatives = 1;
-
-    recognition.onstart = () => setIsListening(true);
-
-    recognition.onresult = (event: any) => {
-      const transcript = Array.from(event.results)
-        .map((r: any) => r[0].transcript)
-        .join('');
-      setVoiceText(transcript);
-
-      // Use the LAST result's isFinal flag (not event.results[0])
-      const lastResult = event.results[event.results.length - 1];
-      if (lastResult?.isFinal) {
-        const parsed = parseVoiceInput(transcript);
-        if (parsed.amount) setAmount(String(parsed.amount));
-        if (parsed.description) setDescription(parsed.description);
-        setVoiceText('');
-        setIsListening(false);
-      }
-    };
-
-    recognition.onerror = (e: any) => {
-      setIsListening(false);
-      setVoiceText('');
-      if (e.error === 'service-not-allowed' || e.error === 'not-allowed') {
-        // Silently hide the voice button — WebView/browser doesn't permit it
-        setVoiceBlocked(true);
-      } else if (e.error === 'no-speech') {
-        // User didn't speak — ignore silently
-      } else {
-        console.warn('Voice recognition error:', e.error);
-      }
-    };
-
-    recognition.onend = () => {
-      setIsListening(false);
-    };
-
-    try {
-      recognition.start();
-    } catch (err) {
-      console.warn('Recognition start error:', err);
-      setIsListening(false);
-      setVoiceBlocked(true);
-    }
-  };
+  const accentColor = isExpense ? '#FF6B35' : '#00C896';
+  const accentBg = isExpense ? '#FFF0EB' : '#E8FFF5';
 
   const handleSubmit = () => {
     const numAmount = parseFloat(amount);
@@ -118,18 +150,213 @@ export function AddTransactionPage() {
     navigate(-1);
   };
 
-  const accentColor = isExpense ? '#FF6B35' : '#00C896';
-  const accentBg = isExpense ? '#FFF0EB' : '#E8FFF5';
+  // Parse dictated text into transactions
+  const handleDictateParse = () => {
+    const text = dictateText.trim();
+    if (!text) return;
+    const txs = parseVoiceToTransactions(text);
+    if (txs.length > 0) {
+      setParsedTxs(txs);
+    }
+  };
 
-  // Show voice button if the API exists and hasn't been blocked by a permission error.
-  // We do NOT proactively hide it in Telegram WebView here — the description voice input
-  // is useful and some Telegram versions do support it. If it fails, voiceBlocked is set
-  // and the button disappears gracefully.
-  const voiceSupported =
-    typeof window !== 'undefined' &&
-    (!!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition) &&
-    !voiceBlocked;
+  // Save all parsed transactions
+  const handleSaveParsed = () => {
+    if (!parsedTxs) return;
+    for (const tx of parsedTxs) {
+      addTransaction({
+        type: tx.type,
+        amount: tx.amount,
+        categoryId: tx.categoryId,
+        description: tx.description,
+        date: new Date().toISOString(),
+      });
+    }
+    navigate(-1);
+  };
 
+  // Fill manual form from first parsed tx
+  const handleFillFromParsed = (tx: ParsedTx) => {
+    setType(tx.type);
+    setAmount(String(tx.amount));
+    setDescription(tx.description);
+    setSelectedCategory(tx.categoryId);
+    setDictateMode(false);
+    setParsedTxs(null);
+    setDictateText('');
+  };
+
+  const getCategoryName = (catId: string): string => {
+    const all = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES];
+    return all.find((c) => c.id === catId)?.name ?? catId;
+  };
+
+  const getCategoryIcon = (catId: string): string => {
+    const all = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES];
+    return all.find((c) => c.id === catId)?.icon ?? '💰';
+  };
+
+  // ── Dictate mode overlay ──────────────────────────────────────────────────
+  if (dictateMode) {
+    return (
+      <div className="flex flex-col flex-1 min-h-0" style={{ background: 'var(--bg-warm)' }}>
+        {/* Header */}
+        <div className="flex-shrink-0 flex items-center gap-3 px-4 pt-5 pb-4 glass border-b border-white/60">
+          <button
+            onClick={() => { setDictateMode(false); setParsedTxs(null); }}
+            className="w-9 h-9 rounded-2xl flex items-center justify-center haptic text-lg"
+            style={{ background: 'rgba(0,0,0,0.06)' }}
+          >
+            ←
+          </button>
+          <h1 className="text-lg font-bold text-gray-900">Голосовой ввод</h1>
+        </div>
+
+        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
+          {/* Instructions */}
+          <div className="bg-white rounded-2xl p-4 mb-4" style={{ boxShadow: 'var(--shadow-card)' }}>
+            <div className="text-sm font-semibold text-gray-700 mb-2">💡 Как использовать</div>
+            <div className="text-xs text-gray-500 space-y-1">
+              <div>• Нажмите на поле ниже и используйте 🎤 на клавиатуре</div>
+              <div>• Или просто напечатайте текстом</div>
+              <div>• Можно описать несколько трат сразу</div>
+            </div>
+            <div className="mt-3 space-y-1">
+              {[
+                '«потратил 500 на кофе»',
+                '«купил продукты на 1500 и такси 350»',
+                '«зарплата 80000»',
+                '«кофе 200 и метро 50 и обед 400»',
+              ].map((ex) => (
+                <button
+                  key={ex}
+                  onClick={() => setDictateText(ex.replace(/«|»/g, ''))}
+                  className="block w-full text-left text-xs px-3 py-1.5 rounded-xl haptic"
+                  style={{ background: 'rgba(108,99,255,0.06)', color: '#6C63FF' }}
+                >
+                  {ex}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Dictation textarea */}
+          <div className="bg-white rounded-2xl p-4 mb-4" style={{ boxShadow: 'var(--shadow-card)' }}>
+            <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Опишите операцию</div>
+            <textarea
+              ref={dictateRef}
+              value={dictateText}
+              onChange={(e) => { setDictateText(e.target.value); setParsedTxs(null); }}
+              placeholder="Например: потратил 500 на кофе и 200 на метро..."
+              rows={4}
+              className="w-full bg-transparent outline-none text-sm text-gray-800 placeholder-gray-300 resize-none"
+              style={{
+                fontSize: '16px',
+                lineHeight: '1.5',
+                border: 'none',
+              }}
+              autoComplete="off"
+              autoCorrect="on"
+              autoCapitalize="sentences"
+              spellCheck={false}
+            />
+          </div>
+
+          {/* Parse button */}
+          {dictateText.trim() && !parsedTxs && (
+            <motion.button
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              onClick={handleDictateParse}
+              className="w-full py-4 rounded-2xl text-white font-bold text-base haptic mb-4"
+              style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}
+            >
+              🤖 Распознать операции
+            </motion.button>
+          )}
+
+          {/* Parsed results */}
+          <AnimatePresence>
+            {parsedTxs && parsedTxs.length > 0 && (
+              <motion.div
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+              >
+                <div className="text-sm font-semibold text-gray-700 mb-2">
+                  ✅ Распознано {parsedTxs.length} {parsedTxs.length === 1 ? 'операция' : parsedTxs.length < 5 ? 'операции' : 'операций'}
+                </div>
+                <div className="space-y-2 mb-4">
+                  {parsedTxs.map((tx, i) => (
+                    <motion.div
+                      key={i}
+                      initial={{ opacity: 0, x: -8 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: i * 0.06 }}
+                      className="bg-white rounded-2xl p-3 flex items-center gap-3"
+                      style={{ boxShadow: 'var(--shadow-card)' }}
+                    >
+                      <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl flex-shrink-0"
+                        style={{ background: tx.type === 'expense' ? '#FFF0EB' : '#E8FFF5' }}>
+                        {getCategoryIcon(tx.categoryId)}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-semibold text-gray-800 truncate">
+                          {tx.description || getCategoryName(tx.categoryId)}
+                        </div>
+                        <div className="text-xs text-gray-400">{getCategoryName(tx.categoryId)}</div>
+                      </div>
+                      <div className="text-right flex-shrink-0">
+                        <div className="font-bold text-base"
+                          style={{ color: tx.type === 'expense' ? '#FF6B35' : '#00C896' }}>
+                          {tx.type === 'expense' ? '−' : '+'}{tx.amount.toLocaleString('ru-RU')} ₽
+                        </div>
+                        {parsedTxs.length > 1 && (
+                          <button
+                            onClick={() => handleFillFromParsed(tx)}
+                            className="text-xs text-purple-500 haptic"
+                          >
+                            Изменить
+                          </button>
+                        )}
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+
+                {/* Save all */}
+                <motion.button
+                  whileTap={{ scale: 0.97 }}
+                  onClick={handleSaveParsed}
+                  className="w-full py-4 rounded-2xl text-white font-bold text-base haptic mb-3"
+                  style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)', boxShadow: '0 4px 20px rgba(108,99,255,0.35)' }}
+                >
+                  💾 Сохранить {parsedTxs.length > 1 ? `все ${parsedTxs.length} операции` : 'операцию'}
+                </motion.button>
+
+                {parsedTxs.length === 1 && (
+                  <button
+                    onClick={() => handleFillFromParsed(parsedTxs[0]!)}
+                    className="w-full py-3 rounded-2xl text-sm font-semibold haptic"
+                    style={{ background: 'rgba(108,99,255,0.08)', color: '#6C63FF' }}
+                  >
+                    ✏️ Редактировать перед сохранением
+                  </button>
+                )}
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {parsedTxs && parsedTxs.length === 0 && (
+            <div className="text-center text-sm text-gray-400 py-4">
+              Не удалось распознать сумму. Попробуйте написать иначе, например: «500 на кофе»
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Manual entry mode ─────────────────────────────────────────────────────
   return (
     <div className="flex flex-col flex-1 min-h-0" style={{ background: 'var(--bg-warm)' }}>
       {/* Header */}
@@ -141,7 +368,15 @@ export function AddTransactionPage() {
         >
           ←
         </button>
-        <h1 className="text-lg font-bold text-gray-900">Новая операция</h1>
+        <h1 className="text-lg font-bold text-gray-900 flex-1">Новая операция</h1>
+        {/* Dictate button */}
+        <button
+          onClick={() => setDictateMode(true)}
+          className="flex items-center gap-1.5 px-3 py-2 rounded-2xl text-sm font-semibold haptic"
+          style={{ background: 'rgba(108,99,255,0.1)', color: '#6C63FF' }}
+        >
+          🎤 Надиктовать
+        </button>
       </div>
 
       {/* Scrollable content */}
@@ -179,13 +414,13 @@ export function AddTransactionPage() {
               onChange={(e) => setAmount(e.target.value)}
               placeholder="0"
               className="text-5xl font-bold bg-transparent outline-none text-center w-44 placeholder-gray-200"
-              style={{ color: accentColor }}
+              style={{ color: accentColor, fontSize: '3rem' }}
             />
             <span className="text-3xl font-bold text-gray-200">₽</span>
           </div>
 
           {/* Quick amounts */}
-          <div className="flex gap-2 justify-center mb-4">
+          <div className="flex gap-2 justify-center">
             {[100, 500, 1000, 3000].map((preset) => (
               <button
                 key={preset}
@@ -200,45 +435,6 @@ export function AddTransactionPage() {
               </button>
             ))}
           </div>
-
-          {/* Voice button */}
-          {voiceSupported && (
-            <div className="flex justify-center">
-              <motion.button
-                whileTap={{ scale: 0.9 }}
-                onClick={handleVoiceInput}
-                animate={isListening ? { scale: [1, 1.08, 1] } : { scale: 1 }}
-                transition={isListening ? { repeat: Infinity, duration: 0.8 } : { duration: 0.1 }}
-                className="flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-semibold haptic transition-all"
-                style={isListening
-                  ? { background: '#FF4757', color: 'white', boxShadow: '0 4px 16px rgba(255,71,87,0.4)' }
-                  : { background: accentBg, color: accentColor }
-                }
-              >
-                🎤 {isListening ? 'Слушаю...' : 'Голосовой ввод'}
-              </motion.button>
-            </div>
-          )}
-
-          <AnimatePresence>
-            {voiceText && (
-              <motion.div
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0 }}
-                className="mt-3 text-center text-sm text-gray-500 italic"
-              >
-                "{voiceText}"
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          {/* Voice hint */}
-          {voiceSupported && !isListening && !voiceText && (
-            <p className="text-center text-xs text-gray-400 mt-2">
-              Скажите: «потратил 500 рублей на кофе»
-            </p>
-          )}
         </div>
 
         {/* Categories */}
@@ -279,6 +475,7 @@ export function AddTransactionPage() {
             onChange={(e) => setDescription(e.target.value)}
             placeholder="Комментарий (необязательно)"
             className="flex-1 text-gray-800 placeholder-gray-300 outline-none text-sm font-medium"
+            style={{ fontSize: '16px' }}
           />
         </div>
 
