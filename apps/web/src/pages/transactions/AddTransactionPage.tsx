@@ -121,13 +121,14 @@ export function AddTransactionPage() {
   const accentColor = isExpense ? '#FF6B35' : '#00C896';
   const accentBg = isExpense ? '#FFF0EB' : '#E8FFF5';
 
-  // Hide voice in Telegram WebView — SpeechRecognition always fails there.
-  const isTgWebView = !!(window as any).Telegram?.WebApp;
+  // Show voice button if the API exists and hasn't been blocked by a permission error.
+  // We do NOT proactively hide it in Telegram WebView here — the description voice input
+  // is useful and some Telegram versions do support it. If it fails, voiceBlocked is set
+  // and the button disappears gracefully.
   const voiceSupported =
     typeof window !== 'undefined' &&
     (!!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition) &&
-    !voiceBlocked &&
-    !isTgWebView;
+    !voiceBlocked;
 
   return (
     <div className="flex flex-col flex-1 min-h-0" style={{ background: 'var(--bg-warm)' }}>
