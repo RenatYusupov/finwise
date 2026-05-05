@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useFinanceStore } from '@/features/finance/store';
 import { formatCurrency } from '@/shared/utils/format';
@@ -31,6 +31,13 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
     onClose();
   };
 
+  // Lock body scroll while modal is open
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, []);
+
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -45,9 +52,20 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
         animate={{ y: 0 }}
         exit={{ y: '100%' }}
         transition={{ type: 'spring', damping: 28, stiffness: 320 }}
-        className="w-full bg-white rounded-t-3xl p-6 max-h-[92vh] overflow-y-auto"
+        className="w-full bg-white rounded-t-3xl"
+        style={{ maxHeight: '92vh', display: 'flex', flexDirection: 'column' }}
+        onClick={(e) => e.stopPropagation()}
       >
-        <div className="w-10 h-1 bg-gray-200 rounded-full mx-auto mb-5" />
+        {/* Drag handle — fixed, not scrollable */}
+        <div className="flex-shrink-0 pt-4 pb-2 px-6">
+          <div className="w-10 h-1 bg-gray-200 rounded-full mx-auto" />
+        </div>
+
+        {/* Scrollable content */}
+        <div
+          className="flex-1 overflow-y-auto px-6 pb-8"
+          style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
+        >
         <h2 className="text-xl font-bold text-gray-900 mb-5">✨ Новая цель</h2>
 
         {/* Icon picker */}
@@ -154,6 +172,7 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
         >
           Создать цель ✨
         </motion.button>
+        </div>
       </motion.div>
     </motion.div>
   );
@@ -172,6 +191,13 @@ function AddToGoalModal({ goalId, goalName, goalColor, onClose }: {
     onClose();
   };
 
+  // Lock body scroll while modal is open
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, []);
+
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -186,9 +212,20 @@ function AddToGoalModal({ goalId, goalName, goalColor, onClose }: {
         animate={{ y: 0 }}
         exit={{ y: '100%' }}
         transition={{ type: 'spring', damping: 28, stiffness: 320 }}
-        className="w-full bg-white rounded-t-3xl p-6"
+        className="w-full bg-white rounded-t-3xl"
+        style={{ maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}
+        onClick={(e) => e.stopPropagation()}
       >
-        <div className="w-10 h-1 bg-gray-200 rounded-full mx-auto mb-5" />
+        {/* Drag handle */}
+        <div className="flex-shrink-0 pt-4 pb-2 px-6">
+          <div className="w-10 h-1 bg-gray-200 rounded-full mx-auto" />
+        </div>
+
+        {/* Scrollable content */}
+        <div
+          className="flex-1 overflow-y-auto px-6 pb-8"
+          style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
+        >
         <h2 className="text-xl font-bold text-gray-900 mb-1">Пополнить цель</h2>
         <p className="text-gray-500 text-sm mb-5">{goalName}</p>
 
@@ -230,6 +267,7 @@ function AddToGoalModal({ goalId, goalName, goalColor, onClose }: {
         >
           Пополнить 💰
         </motion.button>
+        </div>
       </motion.div>
     </motion.div>
   );

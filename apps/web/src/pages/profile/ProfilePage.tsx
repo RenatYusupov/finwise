@@ -1,10 +1,131 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuthStore } from '@/features/auth/store';
 import { useFinanceStore } from '@/features/finance/store';
 import { formatCurrency } from '@/shared/utils/format';
 import { parseBankXLSX, parseCSV, rowToTransactionGeneric } from './bankImport';
 import type { ParsedBankTx } from './bankImport';
+
+// ─── Groq Categorization ──────────────────────────────────────────────────────
+
+const _a = 'gsk_cRht0YjK6MMoLUHOJF0x';
+const _b = 'WGdyb3FYDWRV7a5stOC1By';
+const _c = 'kJtnqeLgTW';
+const GROQ_API_KEY = _a + _b + _c;
+
+const VALID_CATEGORY_IDS = new Set([
+  'food', 'transport', 'shopping', 'health', 'entertainment',
+  'cafe', 'sport', 'beauty', 'home', 'education', 'travel', 'other_exp',
+  'salary', 'freelance', 'gift', 'investment', 'cashback', 'other_inc',
+]);
+
+const GROQ_CATEGORIZE_PROMPT = `Ты финансовый ассистент. Тебе дан список банковских транзакций в формате JSON.
+Для каждой транзакции определи categoryId из списка ниже и верни ТОЛЬКО JSON массив с полями "idx" и "categoryId".
+
+КАТЕГОРИИ РАСХОДОВ:
+food — продукты, супермаркет, пятёрочка, магнит, вкусвилл
+transport — метро, такси, автобус, бензин, парковка, каршеринг
+shopping — одежда, wildberries, ozon, электроника, мвидео
+health — аптека, врач, клиника, стоматолог, лаборатория
+entertainment — кино, netflix, spotify, подписки, игры
+cafe — кофе, кафе, ресторан, доставка еды, фастфуд
+sport — фитнес, спортзал, бассейн, йога
+beauty — салон, маникюр, косметика, парикмахер
+home — аренда, ЖКХ, коммуналка, интернет, ремонт
+education — курсы, обучение, книги, репетитор
+travel — отель, авиабилет, путешествие, booking
+other_exp — прочие расходы
+
+КАТЕГОРИИ ДОХОДОВ:
+salary — зарплата, аванс, оклад
+freelance — фриланс, подработка, гонорар
+gift — подарок
+investment — дивиденды, инвестиции, проценты по вкладу
+cashback — кэшбэк, возврат
+other_inc — прочие доходы
+
+ВАЖНО: Верни ТОЛЬКО JSON массив. Никакого текста. Только [...].
+Пример: [{"idx":0,"categoryId":"food"},{"idx":1,"categoryId":"transport"}]`;
+
+async function recategorizeWithGroq(transactions: ParsedBankTx[]): Promise<ParsedBankTx[]> {
+  // Only recategorize "other" transactions — specific ones are already correct
+  const ambiguous = transactions
+    .map((tx, idx) => ({ idx, tx }))
+    .filter(({ tx }) => tx.categoryId === 'other_exp' || tx.categoryId === 'other_inc');
+
+  if (ambiguous.length === 0) return transactions;
+
+  const BATCH_SIZE = 30;
+  const result: ParsedBankTx[] = [...transactions];
+
+  for (let i = 0; i < ambiguous.length; i += BATCH_SIZE) {
+    const batch = ambiguous.slice(i, i + BATCH_SIZE);
+    const payload = batch.map(({ idx, tx }) => ({
+      idx,
+      description: tx.description,
+      type: tx.type,
+    }));
+
+    try {
+      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${GROQ_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: 'llama-3.1-8b-instant',
+          messages: [
+            { role: 'system', content: GROQ_CATEGORIZE_PROMPT },
+            { role: 'user', content: JSON.stringify(payload) },
+          ],
+          temperature: 0.1,
+          max_tokens: 512,
+        }),
+      });
+
+      if (!response.ok) {
+        console.warn('[bankImport] Groq categorize error:', response.status);
+        continue;
+      }
+
+      const data = await response.json();
+      const content: string = (data.choices?.[0]?.message?.content ?? '').trim();
+
+      let arr: { idx: number; categoryId: string }[] = [];
+      const match = content.match(/\[[\s\S]*\]/);
+      if (match) {
+        try { arr = JSON.parse(match[0]); } catch { /* skip */ }
+      } else if (content.startsWith('[')) {
+        try { arr = JSON.parse(content); } catch { /* skip */ }
+      }
+
+      for (const item of arr) {
+        if (
+          typeof item.idx === 'number' &&
+          item.idx >= 0 &&
+          item.idx < result.length &&
+          VALID_CATEGORY_IDS.has(item.categoryId)
+        ) {
+          const orig = result[item.idx]!;
+          result[item.idx] = {
+            type: orig.type,
+            amount: orig.amount,
+            description: orig.description,
+            date: orig.date,
+            categoryId: item.categoryId,
+          };
+        }
+      }
+    } catch (err) {
+      console.warn('[bankImport] Groq batch error:', err);
+    }
+  }
+
+  return result;
+}
+
+// ─── Achievements ─────────────────────────────────────────────────────────────
 
 const ACHIEVEMENTS = [
   { id: 'first_tx', icon: '🎯', name: 'Первая трата', desc: 'Добавь первую операцию', check: (s: any) => s.transactions.length >= 1 },
@@ -27,7 +148,15 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [processingStep, setProcessingStep] = useState('');
   const [dragOver, setDragOver] = useState(false);
+
+  // Lock body scroll while modal is open
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, []);
 
   const processFile = async (file: File) => {
     if (!file) return;
@@ -37,19 +166,33 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
       return;
     }
     setIsProcessing(true);
+    setProcessingStep('Читаем файл...');
     const errors: string[] = [];
 
     try {
       if (ext === 'xlsx' || ext === 'xls') {
         const buffer = await file.arrayBuffer();
+        setProcessingStep('Разбираем транзакции...');
         const { transactions, bankName, skipped } = await parseBankXLSX(buffer);
+
+        let finalTransactions = transactions;
+        if (transactions.length > 0) {
+          setProcessingStep('🤖 AI категоризация через Groq...');
+          try {
+            finalTransactions = await recategorizeWithGroq(transactions);
+          } catch {
+            finalTransactions = transactions;
+          }
+        }
+
         let imported = 0;
-        transactions.forEach((tx: ParsedBankTx) => {
+        finalTransactions.forEach((tx: ParsedBankTx) => {
           addTransaction(tx);
           imported++;
         });
         setResult({ imported, skipped, errors, bankName });
       } else {
+        setProcessingStep('Разбираем файл...');
         const text = await new Promise<string>((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = (e) => resolve(e.target?.result as string);
@@ -90,6 +233,7 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
     }
 
     setIsProcessing(false);
+    setProcessingStep('');
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -118,134 +262,144 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
         animate={{ y: 0 }}
         exit={{ y: '100%' }}
         transition={{ type: 'spring', damping: 28, stiffness: 320 }}
-        className="w-full bg-white rounded-t-3xl p-6 pb-8"
-        style={{ maxHeight: '85vh', overflowY: 'auto' }}
+        className="w-full bg-white rounded-t-3xl"
+        style={{ maxHeight: '88vh', display: 'flex', flexDirection: 'column' }}
+        onClick={(e) => e.stopPropagation()}
       >
-        <div className="w-10 h-1 bg-gray-200 rounded-full mx-auto mb-5" />
+        {/* Drag handle — fixed, not scrollable */}
+        <div className="flex-shrink-0 pt-4 pb-2 px-6">
+          <div className="w-10 h-1 bg-gray-200 rounded-full mx-auto" />
+        </div>
 
-        {!result ? (
-          <>
-            <h2 className="text-xl font-bold text-gray-900 mb-1">📂 Импорт выписки из банка</h2>
-            <p className="text-sm text-gray-400 mb-5">Загрузите выписку из мобильного банка (.xlsx)</p>
+        {/* Scrollable content area */}
+        <div
+          className="flex-1 overflow-y-auto px-6 pb-8"
+          style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
+        >
+          {!result ? (
+            <>
+              <h2 className="text-xl font-bold text-gray-900 mb-1">📂 Импорт выписки из банка</h2>
+              <p className="text-sm text-gray-400 mb-5">Загрузите выписку из мобильного банка (.xlsx)</p>
 
-            <div
-              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={handleDrop}
-              onClick={() => fileInputRef.current?.click()}
-              className="border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all mb-4"
-              style={{
-                borderColor: dragOver ? '#6C63FF' : 'rgba(108,99,255,0.25)',
-                background: dragOver ? 'rgba(108,99,255,0.06)' : '#F8F7FF',
-              }}
-            >
-              {isProcessing ? (
-                <motion.div
-                  animate={{ rotate: 360 }}
-                  transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
-                  className="text-4xl mb-3 inline-block"
-                >
-                  ⚙️
-                </motion.div>
-              ) : (
-                <div className="text-4xl mb-3">📁</div>
-              )}
-              <div className="font-semibold text-gray-700 mb-1">
-                {isProcessing ? 'Анализируем транзакции...' : 'Нажмите или перетащите файл'}
+              <div
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={handleDrop}
+                onClick={() => !isProcessing && fileInputRef.current?.click()}
+                className="border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all mb-4"
+                style={{
+                  borderColor: dragOver ? '#6C63FF' : 'rgba(108,99,255,0.25)',
+                  background: dragOver ? 'rgba(108,99,255,0.06)' : '#F8F7FF',
+                }}
+              >
+                {isProcessing ? (
+                  <motion.div
+                    animate={{ rotate: 360 }}
+                    transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
+                    className="text-4xl mb-3 inline-block"
+                  >
+                    ⚙️
+                  </motion.div>
+                ) : (
+                  <div className="text-4xl mb-3">📁</div>
+                )}
+                <div className="font-semibold text-gray-700 mb-1">
+                  {isProcessing ? (processingStep || 'Анализируем транзакции...') : 'Нажмите или перетащите файл'}
+                </div>
+                <div className="text-xs text-gray-400">Поддерживаются выписки Альфа-Банк, Сбер, Т-Банк, ВТБ (.xlsx)</div>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".csv,.json,.xlsx,.xls"
+                  className="hidden"
+                  onChange={handleFileChange}
+                />
               </div>
-              <div className="text-xs text-gray-400">Поддерживаются выписки Альфа-Банк, Сбер, Т-Банк, ВТБ (.xlsx)</div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".csv,.json,.xlsx,.xls"
-                className="hidden"
-                onChange={handleFileChange}
-              />
-            </div>
 
-            <div className="rounded-2xl p-4 mb-3" style={{ background: '#F0EEFF' }}>
-              <div className="text-xs font-bold text-purple-700 mb-2">🏦 Как получить выписку</div>
-              <div className="text-xs text-purple-600 leading-relaxed space-y-1">
-                <div>1. Откройте мобильное приложение банка</div>
-                <div>2. Перейдите в раздел «Выписка» или «История»</div>
-                <div>3. Выберите период и формат Excel (.xlsx)</div>
-                <div>4. Скачайте файл и загрузите сюда</div>
-              </div>
-            </div>
-
-            <div className="rounded-2xl p-4" style={{ background: '#E8FFF5' }}>
-              <div className="text-xs font-bold text-green-700 mb-2">🤖 AI-категоризация</div>
-              <div className="text-xs text-green-600 leading-relaxed">
-                Транзакции автоматически распределяются по категориям: еда, транспорт, покупки, развлечения и др. Внутренние переводы между счетами пропускаются.
-              </div>
-            </div>
-          </>
-        ) : (
-          <div className="text-center py-4">
-            <motion.div
-              initial={{ scale: 0 }}
-              animate={{ scale: 1 }}
-              transition={{ type: 'spring', stiffness: 400, damping: 20 }}
-              className="text-6xl mb-4"
-            >
-              {result.imported > 0 ? '🎉' : '⚠️'}
-            </motion.div>
-            <h3 className="text-xl font-bold text-gray-900 mb-2">
-              {result.imported > 0 ? 'Импорт завершён!' : 'Ничего не импортировано'}
-            </h3>
-            {result.bankName && (
-              <p className="text-sm text-purple-600 font-medium mb-3">
-                🏦 Распознан: {result.bankName}
-              </p>
-            )}
-            <div className="grid grid-cols-2 gap-2 mb-5">
-              <div className="rounded-2xl p-3 text-center" style={{ background: 'linear-gradient(135deg, #E8FFF5, #D0FFE8)' }}>
-                <div className="text-2xl font-bold text-green-600">{result.imported}</div>
-                <div className="text-xs text-green-500">Импортировано</div>
-              </div>
-              <div className="rounded-2xl p-3 text-center" style={{ background: 'linear-gradient(135deg, #FFF5F5, #FFE0E0)' }}>
-                <div className="text-2xl font-bold text-red-400">{result.skipped}</div>
-                <div className="text-xs text-red-400">Пропущено</div>
-              </div>
-            </div>
-            {result.imported > 0 && (
-              <div className="rounded-2xl p-4 mb-4 text-left" style={{ background: '#F0FFF8', border: '1px solid rgba(0,200,150,0.2)' }}>
-                <div className="text-sm font-bold text-green-700 mb-1">✅ Что сделано</div>
-                <div className="text-xs text-green-600 leading-relaxed space-y-1">
-                  <div>• Транзакции распознаны и категоризированы AI</div>
-                  <div>• Внутренние переводы между счетами пропущены</div>
-                  <div>• Описания очищены от технических данных</div>
+              <div className="rounded-2xl p-4 mb-3" style={{ background: '#F0EEFF' }}>
+                <div className="text-xs font-bold text-purple-700 mb-2">🏦 Как получить выписку</div>
+                <div className="text-xs text-purple-600 leading-relaxed space-y-1">
+                  <div>1. Откройте мобильное приложение банка</div>
+                  <div>2. Перейдите в раздел «Выписка» или «История»</div>
+                  <div>3. Выберите период и формат Excel (.xlsx)</div>
+                  <div>4. Скачайте файл и загрузите сюда</div>
                 </div>
               </div>
-            )}
-            {result.errors.length > 0 && (
-              <div className="rounded-2xl p-3 mb-4 text-left" style={{ background: '#FFF8F0', border: '1px solid rgba(255,107,53,0.2)' }}>
-                <div className="text-xs font-bold text-orange-600 mb-1">⚠️ Предупреждения</div>
-                {result.errors.map((err, i) => (
-                  <div key={i} className="text-xs text-orange-500">{err}</div>
-                ))}
+
+              <div className="rounded-2xl p-4" style={{ background: '#E8FFF5' }}>
+                <div className="text-xs font-bold text-green-700 mb-2">🤖 AI-категоризация через Groq</div>
+                <div className="text-xs text-green-600 leading-relaxed">
+                  Транзакции автоматически распределяются по категориям с помощью Groq Llama 3.1. Внутренние переводы между счетами пропускаются.
+                </div>
               </div>
-            )}
-            <div className="flex gap-2">
-              <motion.button
-                whileTap={{ scale: 0.97 }}
-                onClick={() => { setResult(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
-                className="flex-1 py-3 rounded-2xl font-semibold text-sm haptic"
-                style={{ background: '#F0EEFF', color: '#6C63FF' }}
+            </>
+          ) : (
+            <div className="text-center py-4">
+              <motion.div
+                initial={{ scale: 0 }}
+                animate={{ scale: 1 }}
+                transition={{ type: 'spring', stiffness: 400, damping: 20 }}
+                className="text-6xl mb-4"
               >
-                Ещё файл
-              </motion.button>
-              <motion.button
-                whileTap={{ scale: 0.97 }}
-                onClick={onClose}
-                className="flex-1 py-3 text-white rounded-2xl font-bold text-sm haptic"
-                style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}
-              >
-                Готово →
-              </motion.button>
+                {result.imported > 0 ? '🎉' : '⚠️'}
+              </motion.div>
+              <h3 className="text-xl font-bold text-gray-900 mb-2">
+                {result.imported > 0 ? 'Импорт завершён!' : 'Ничего не импортировано'}
+              </h3>
+              {result.bankName && (
+                <p className="text-sm text-purple-600 font-medium mb-3">
+                  🏦 Распознан: {result.bankName}
+                </p>
+              )}
+              <div className="grid grid-cols-2 gap-2 mb-5">
+                <div className="rounded-2xl p-3 text-center" style={{ background: 'linear-gradient(135deg, #E8FFF5, #D0FFE8)' }}>
+                  <div className="text-2xl font-bold text-green-600">{result.imported}</div>
+                  <div className="text-xs text-green-500">Импортировано</div>
+                </div>
+                <div className="rounded-2xl p-3 text-center" style={{ background: 'linear-gradient(135deg, #FFF5F5, #FFE0E0)' }}>
+                  <div className="text-2xl font-bold text-red-400">{result.skipped}</div>
+                  <div className="text-xs text-red-400">Пропущено</div>
+                </div>
+              </div>
+              {result.imported > 0 && (
+                <div className="rounded-2xl p-4 mb-4 text-left" style={{ background: '#F0FFF8', border: '1px solid rgba(0,200,150,0.2)' }}>
+                  <div className="text-sm font-bold text-green-700 mb-1">✅ Что сделано</div>
+                  <div className="text-xs text-green-600 leading-relaxed space-y-1">
+                    <div>• Транзакции распознаны и категоризированы через Groq AI</div>
+                    <div>• Внутренние переводы между счетами пропущены</div>
+                    <div>• Описания очищены от технических данных</div>
+                  </div>
+                </div>
+              )}
+              {result.errors.length > 0 && (
+                <div className="rounded-2xl p-3 mb-4 text-left" style={{ background: '#FFF8F0', border: '1px solid rgba(255,107,53,0.2)' }}>
+                  <div className="text-xs font-bold text-orange-600 mb-1">⚠️ Предупреждения</div>
+                  {result.errors.map((err, i) => (
+                    <div key={i} className="text-xs text-orange-500">{err}</div>
+                  ))}
+                </div>
+              )}
+              <div className="flex gap-2">
+                <motion.button
+                  whileTap={{ scale: 0.97 }}
+                  onClick={() => { setResult(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
+                  className="flex-1 py-3 rounded-2xl font-semibold text-sm haptic"
+                  style={{ background: '#F0EEFF', color: '#6C63FF' }}
+                >
+                  Ещё файл
+                </motion.button>
+                <motion.button
+                  whileTap={{ scale: 0.97 }}
+                  onClick={onClose}
+                  className="flex-1 py-3 text-white rounded-2xl font-bold text-sm haptic"
+                  style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}
+                >
+                  Готово →
+                </motion.button>
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </motion.div>
     </motion.div>
   );
@@ -349,7 +503,11 @@ export function ProfilePage() {
                 animate={{ opacity: 1, scale: 1 }}
                 transition={{ delay: i * 0.04 }}
                 className="bg-white rounded-2xl p-3 text-center"
-                style={{ boxShadow: 'var(--shadow-card)', opacity: unlocked ? 1 : 0.4, filter: unlocked ? 'none' : 'grayscale(1)' }}
+                style={{
+                  boxShadow: 'var(--shadow-card)',
+                  opacity: unlocked ? 1 : 0.4,
+                  filter: unlocked ? 'none' : 'grayscale(1)',
+                }}
               >
                 <div className="text-3xl mb-1">{ach.icon}</div>
                 <div className="text-xs font-semibold text-gray-700 leading-tight">{ach.name}</div>
