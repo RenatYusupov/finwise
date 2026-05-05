@@ -159,11 +159,17 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
   const [processingStep, setProcessingStep] = useState('');
   const [dragOver, setDragOver] = useState(false);
 
-  // Lock body scroll while modal is open
+  // Lock background scroll in Telegram WebView — touchmove prevention is the only reliable method
   useEffect(() => {
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = prev; };
+    // Also prevent touchmove on document to stop WebView scroll-through
+    const preventScroll = (e: TouchEvent) => { e.preventDefault(); };
+    document.addEventListener('touchmove', preventScroll, { passive: false });
+    return () => {
+      document.body.style.overflow = prev;
+      document.removeEventListener('touchmove', preventScroll);
+    };
   }, []);
 
   const processFile = async (file: File) => {
@@ -273,16 +279,18 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
         className="w-full bg-white rounded-t-3xl"
         style={{ maxHeight: '88vh', display: 'flex', flexDirection: 'column' }}
         onClick={(e) => e.stopPropagation()}
+        onTouchMove={(e) => e.stopPropagation()}
       >
         {/* Drag handle — fixed, not scrollable */}
         <div className="flex-shrink-0 pt-4 pb-2 px-6">
           <div className="w-10 h-1 bg-gray-200 rounded-full mx-auto" />
         </div>
 
-        {/* Scrollable content area */}
+        {/* Scrollable content area — stopPropagation lets this div scroll while backdrop is locked */}
         <div
           className="flex-1 overflow-y-auto px-6 pb-8"
           style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
+          onTouchMove={(e) => e.stopPropagation()}
         >
           {!result ? (
             <>

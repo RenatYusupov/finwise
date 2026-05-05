@@ -31,11 +31,16 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
     onClose();
   };
 
-  // Lock body scroll while modal is open
+  // Lock background scroll — touchmove prevention is the only reliable method in Telegram WebView
   useEffect(() => {
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = prev; };
+    const preventScroll = (e: TouchEvent) => { e.preventDefault(); };
+    document.addEventListener('touchmove', preventScroll, { passive: false });
+    return () => {
+      document.body.style.overflow = prev;
+      document.removeEventListener('touchmove', preventScroll);
+    };
   }, []);
 
   return (
@@ -55,6 +60,7 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
         className="w-full bg-white rounded-t-3xl"
         style={{ maxHeight: '92vh', display: 'flex', flexDirection: 'column' }}
         onClick={(e) => e.stopPropagation()}
+        onTouchMove={(e) => e.stopPropagation()}
       >
         {/* Drag handle — fixed, not scrollable */}
         <div className="flex-shrink-0 pt-4 pb-2 px-6">
@@ -65,6 +71,7 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
         <div
           className="flex-1 overflow-y-auto px-6 pb-8"
           style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
+          onTouchMove={(e) => e.stopPropagation()}
         >
         <h2 className="text-xl font-bold text-gray-900 mb-5">✨ Новая цель</h2>
 
@@ -191,11 +198,16 @@ function AddToGoalModal({ goalId, goalName, goalColor, onClose }: {
     onClose();
   };
 
-  // Lock body scroll while modal is open
+  // Lock background scroll — touchmove prevention is the only reliable method in Telegram WebView
   useEffect(() => {
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = prev; };
+    const preventScroll = (e: TouchEvent) => { e.preventDefault(); };
+    document.addEventListener('touchmove', preventScroll, { passive: false });
+    return () => {
+      document.body.style.overflow = prev;
+      document.removeEventListener('touchmove', preventScroll);
+    };
   }, []);
 
   return (
@@ -215,6 +227,7 @@ function AddToGoalModal({ goalId, goalName, goalColor, onClose }: {
         className="w-full bg-white rounded-t-3xl"
         style={{ maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}
         onClick={(e) => e.stopPropagation()}
+        onTouchMove={(e) => e.stopPropagation()}
       >
         {/* Drag handle */}
         <div className="flex-shrink-0 pt-4 pb-2 px-6">
@@ -225,6 +238,7 @@ function AddToGoalModal({ goalId, goalName, goalColor, onClose }: {
         <div
           className="flex-1 overflow-y-auto px-6 pb-8"
           style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
+          onTouchMove={(e) => e.stopPropagation()}
         >
         <h2 className="text-xl font-bold text-gray-900 mb-1">Пополнить цель</h2>
         <p className="text-gray-500 text-sm mb-5">{goalName}</p>
