@@ -66,6 +66,14 @@ interface TelegramWebApp {
   offEvent(eventType: string, eventHandler: () => void): void;
   version: string;
   platform: string;
+  CloudStorage: {
+    setItem(key: string, value: string, callback?: (err: unknown, stored: boolean) => void): void;
+    getItem(key: string, callback: (err: unknown, value: string) => void): void;
+    getItems(keys: string[], callback: (err: unknown, values: Record<string, string>) => void): void;
+    removeItem(key: string, callback?: (err: unknown, removed: boolean) => void): void;
+    removeItems(keys: string[], callback?: (err: unknown, removed: boolean) => void): void;
+    getKeys(callback: (err: unknown, keys: string[]) => void): void;
+  };
 }
 
 interface Window {

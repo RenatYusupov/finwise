@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { persist, type StorageValue } from 'zustand/middleware';
 
 export type TransactionType = 'expense' | 'income' | 'transfer';
 
@@ -76,6 +76,112 @@ export const ALL_CATEGORIES = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES];
 function getCategoryById(id: string): Category | undefined {
   return ALL_CATEGORIES.find((c) => c.id === id);
 }
+
+// ─── Telegram CloudStorage sync ───────────────────────────────────────────────
+// Splits large data into 1KB chunks (CloudStorage limit per key is 4096 bytes,
+// but we chunk at 1000 chars to stay safe with JSON overhead).
+// Falls back to localStorage when CloudStorage is unavailable (desktop browser).
+
+const CLOUD_KEY = 'fw_finance';
+const CHUNK_SIZE = 1000; // chars per chunk
+
+function tgCloud() {
+  return window.Telegram?.WebApp?.CloudStorage ?? null;
+}
+
+function splitChunks(str: string): string[] {
+  const chunks: string[] = [];
+  for (let i = 0; i < str.length; i += CHUNK_SIZE) {
+    chunks.push(str.slice(i, i + CHUNK_SIZE));
+  }
+  return chunks;
+}
+
+/** Write value to Telegram CloudStorage (chunked) */
+async function cloudSet(value: string): Promise<void> {
+  const cloud = tgCloud();
+  if (!cloud) return;
+  const chunks = splitChunks(value);
+  // Store chunk count
+  await new Promise<void>((res) =>
+    cloud.setItem(`${CLOUD_KEY}_n`, String(chunks.length), () => res())
+  );
+  await Promise.all(
+    chunks.map(
+      (chunk, i) =>
+        new Promise<void>((res) =>
+          cloud.setItem(`${CLOUD_KEY}_${i}`, chunk, () => res())
+        )
+    )
+  );
+}
+
+/** Read value from Telegram CloudStorage (chunked) */
+async function cloudGet(): Promise<string | null> {
+  const cloud = tgCloud();
+  if (!cloud) return null;
+  const n = await new Promise<string | null>((res) =>
+    cloud.getItem(`${CLOUD_KEY}_n`, (_err: unknown, val: string) => res(val ?? null))
+  );
+  if (!n) return null;
+  const count = parseInt(n, 10);
+  if (!count || isNaN(count)) return null;
+  const keys = Array.from({ length: count }, (_, i) => `${CLOUD_KEY}_${i}`);
+  const chunks = await new Promise<string[]>((res) =>
+    cloud.getItems(keys, (_err: unknown, vals: Record<string, string>) =>
+      res(keys.map((k) => vals[k] ?? ''))
+    )
+  );
+  return chunks.join('');
+}
+
+/** Custom Zustand persist storage: localStorage (fast) + CloudStorage (cross-device sync) */
+const hybridStorage = {
+  getItem: async (name: string): Promise<StorageValue<FinanceState> | null> => {
+    // 1. Try CloudStorage first (authoritative cross-device source)
+    try {
+      const cloudRaw = await cloudGet();
+      if (cloudRaw) {
+        const parsed = JSON.parse(cloudRaw) as StorageValue<FinanceState>;
+        // Mirror to localStorage for fast subsequent reads
+        localStorage.setItem(name, cloudRaw);
+        return parsed;
+      }
+    } catch {
+      // CloudStorage unavailable or parse error — fall through to localStorage
+    }
+    // 2. Fallback: localStorage
+    const raw = localStorage.getItem(name);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as StorageValue<FinanceState>;
+    } catch {
+      return null;
+    }
+  },
+
+  setItem: async (name: string, value: StorageValue<FinanceState>): Promise<void> => {
+    const str = JSON.stringify(value);
+    // Always write to localStorage immediately (synchronous UX)
+    localStorage.setItem(name, str);
+    // Write to CloudStorage asynchronously (cross-device sync)
+    cloudSet(str).catch(() => {/* ignore if unavailable */});
+  },
+
+  removeItem: async (name: string): Promise<void> => {
+    localStorage.removeItem(name);
+    const cloud = tgCloud();
+    if (cloud) {
+      cloud.getItem(`${CLOUD_KEY}_n`, (_err: unknown, val: string) => {
+        const count = parseInt(val ?? '0', 10);
+        const keys = [`${CLOUD_KEY}_n`, ...Array.from({ length: count }, (_, i) => `${CLOUD_KEY}_${i}`)];
+        cloud.removeItems(keys, () => {});
+      });
+    }
+  },
+};
+
+// ─── State ────────────────────────────────────────────────────────────────────
 
 interface FinanceState {
   transactions: Transaction[];
@@ -214,6 +320,9 @@ export const useFinanceStore = create<FinanceState>()(
           .sort((a, b) => b.amount - a.amount);
       },
     }),
-    { name: 'finwise-finance' }
+    {
+      name: 'finwise-finance',
+      storage: hybridStorage,
+    }
   )
 );
