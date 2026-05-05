@@ -294,26 +294,34 @@ export function AiChatPage() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // VisualViewport resize — track keyboard open/close state
-  // We use padding-bottom on the messages area instead of translateY
-  // to avoid the laggy "snap back" animation when keyboard closes
+  // VisualViewport — position input bar at the top of the keyboard
+  // Uses position:fixed + bottom offset so it moves WITH the keyboard instantly
   useEffect(() => {
     const vv = window.visualViewport;
-    if (!vv) return;
+    if (!vv || !inputBarRef.current) return;
 
-    const onResize = () => {
+    const update = () => {
+      if (!inputBarRef.current) return;
+      // Distance from bottom of visual viewport to bottom of layout viewport
+      const offsetBottom = window.innerHeight - (vv.offsetTop + vv.height);
+      inputBarRef.current.style.bottom = `${Math.max(0, offsetBottom)}px`;
+
       const keyboardHeight = window.innerHeight - vv.height - vv.offsetTop;
-      setKeyboardOpen(keyboardHeight > 100);
-      // Scroll to bottom when keyboard opens
-      if (keyboardHeight > 100) {
-        setTimeout(() => {
-          bottomRef.current?.scrollIntoView({ behavior: 'instant' });
-        }, 50);
+      const isOpen = keyboardHeight > 100;
+      setKeyboardOpen(isOpen);
+      if (isOpen) {
+        bottomRef.current?.scrollIntoView({ behavior: 'instant' });
       }
     };
 
-    vv.addEventListener('resize', onResize);
-    return () => vv.removeEventListener('resize', onResize);
+    // Run immediately and on every viewport change
+    update();
+    vv.addEventListener('resize', update);
+    vv.addEventListener('scroll', update);
+    return () => {
+      vv.removeEventListener('resize', update);
+      vv.removeEventListener('scroll', update);
+    };
   }, []);
 
   const hasMessages = aiMessages.length > 0;
@@ -372,11 +380,11 @@ export function AiChatPage() {
         </div>
       </div>
 
-      {/* Messages area — scrollable, padding-bottom grows when keyboard is open */}
+      {/* Messages area — scrollable; padding-bottom reserves space for fixed input bar */}
       <div
         ref={messagesRef}
         className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-4"
-        style={{ paddingBottom: keyboardOpen ? '16px' : '16px' }}
+        style={{ paddingBottom: keyboardOpen ? '80px' : '80px' }}
       >
         {/* Empty state */}
         {!hasMessages && !isTyping && (
@@ -513,13 +521,17 @@ export function AiChatPage() {
         <div ref={bottomRef} />
       </div>
 
-      {/* Input bar — sticky bottom, no JS transform (causes lag); keyboard handled by visualViewport state */}
+      {/* Input bar — position:fixed so it moves instantly with the keyboard (no lag).
+          visualViewport useEffect sets bottom offset to match keyboard height. */}
       <div
         ref={inputBarRef}
-        className="flex-shrink-0 glass border-t border-white/60"
+        className="glass border-t border-white/60"
         style={{
-          position: 'relative',
-          zIndex: 10,
+          position: 'fixed',
+          left: 0,
+          right: 0,
+          bottom: 0, // overridden by visualViewport JS
+          zIndex: 50,
           paddingLeft: '16px',
           paddingRight: '16px',
           paddingTop: '12px',
