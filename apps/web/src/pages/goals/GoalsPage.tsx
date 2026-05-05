@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useFinanceStore } from '@/features/finance/store';
+import { useUIStore } from '@/features/ui/store';
 import { formatCurrency } from '@/shared/utils/format';
 
 const GOAL_ICONS = ['🏠', '🚗', '✈️', '💍', '📱', '💻', '🎓', '🏖️', '💰', '🎯', '🏋️', '🎸'];
@@ -11,6 +12,7 @@ const GOAL_COLORS = [
 
 function AddGoalModal({ onClose }: { onClose: () => void }) {
   const { addGoal } = useFinanceStore();
+  const { openModal, closeModal } = useUIStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [name, setName] = useState('');
   const [targetAmount, setTargetAmount] = useState('');
@@ -32,15 +34,12 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
     onClose();
   };
 
-  // Telegram WebView scroll lock: block touchmove on document except inside the sheet's scrollable div.
+  // Tell AppLayout to switch <main> to overflow-hidden so Telegram WebView
+  // has no scrollable background element when the sheet is open.
   useEffect(() => {
-    const handler = (e: TouchEvent) => {
-      if (scrollRef.current && scrollRef.current.contains(e.target as Node)) return;
-      e.preventDefault();
-    };
-    document.addEventListener('touchmove', handler, { passive: false });
-    return () => document.removeEventListener('touchmove', handler);
-  }, []);
+    openModal();
+    return () => closeModal();
+  }, [openModal, closeModal]);
 
   return (
     <motion.div
@@ -187,6 +186,7 @@ function AddToGoalModal({ goalId, goalName, goalColor, onClose }: {
   goalId: string; goalName: string; goalColor: string; onClose: () => void
 }) {
   const { addToGoal } = useFinanceStore();
+  const { openModal, closeModal } = useUIStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [amount, setAmount] = useState('');
 
@@ -197,15 +197,12 @@ function AddToGoalModal({ goalId, goalName, goalColor, onClose }: {
     onClose();
   };
 
-  // Telegram WebView scroll lock: block touchmove on document except inside the sheet's scrollable div.
+  // Tell AppLayout to switch <main> to overflow-hidden so Telegram WebView
+  // has no scrollable background element when the sheet is open.
   useEffect(() => {
-    const handler = (e: TouchEvent) => {
-      if (scrollRef.current && scrollRef.current.contains(e.target as Node)) return;
-      e.preventDefault();
-    };
-    document.addEventListener('touchmove', handler, { passive: false });
-    return () => document.removeEventListener('touchmove', handler);
-  }, []);
+    openModal();
+    return () => closeModal();
+  }, [openModal, closeModal]);
 
   return (
     <motion.div

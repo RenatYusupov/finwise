@@ -2,6 +2,7 @@ import { Outlet, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { BottomNav } from '@/shared/ui/BottomNav';
 import { AddTransactionFab } from '@/shared/ui/AddTransactionFab';
+import { useUIStore } from '@/features/ui/store';
 
 // Pages that need full-height flex layout (not scrollable wrapper)
 const FULL_HEIGHT_PAGES = ['/transactions/add', '/ai'];
@@ -13,13 +14,21 @@ export function AppLayout() {
   const location = useLocation();
   const isFullHeight = FULL_HEIGHT_PAGES.some((p) => location.pathname.startsWith(p));
   const hideNav = HIDE_NAV_PAGES.some((p) => location.pathname.startsWith(p));
+  const modalOpenCount = useUIStore((s) => s.modalOpenCount);
+  const isModalOpen = modalOpenCount > 0;
+
+  // Compute main className: when a modal is open, remove overflow-y-auto entirely
+  // so Telegram WebView has nothing to scroll in the background.
+  const mainClass = isFullHeight
+    ? 'flex-1 min-h-0 flex flex-col overflow-hidden'
+    : isModalOpen
+      ? 'flex-1 min-h-0 overflow-hidden pb-20'
+      : 'flex-1 min-h-0 overflow-y-auto scroll-area pb-20';
 
   return (
     <div className="flex flex-col h-full" style={{ background: 'var(--bg-warm)' }}>
       {/* Main content area */}
-      <main
-        className={`flex-1 min-h-0 ${isFullHeight ? 'flex flex-col overflow-hidden' : 'overflow-y-auto scroll-area pb-20'}`}
-      >
+      <main className={mainClass}>
         <AnimatePresence mode="wait">
           <motion.div
             key={location.pathname}

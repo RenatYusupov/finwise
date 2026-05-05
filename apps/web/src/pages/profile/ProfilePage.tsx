@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuthStore } from '@/features/auth/store';
 import { useFinanceStore } from '@/features/finance/store';
+import { useUIStore } from '@/features/ui/store';
 import { formatCurrency } from '@/shared/utils/format';
 import { parseBankXLSX, parseCSV, rowToTransactionGeneric } from './bankImport';
 import type { ParsedBankTx } from './bankImport';
@@ -153,6 +154,7 @@ type ImportResult = { imported: number; skipped: number; errors: string[]; bankN
 
 function FileImportModal({ onClose }: { onClose: () => void }) {
   const { addTransaction } = useFinanceStore();
+  const { openModal, closeModal } = useUIStore();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
@@ -160,15 +162,12 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
   const [processingStep, setProcessingStep] = useState('');
   const [dragOver, setDragOver] = useState(false);
 
-  // Telegram WebView scroll lock: block touchmove on document except inside the sheet's scrollable div.
+  // Tell AppLayout to switch <main> to overflow-hidden so Telegram WebView
+  // has no scrollable background element when the sheet is open.
   useEffect(() => {
-    const handler = (e: TouchEvent) => {
-      if (scrollRef.current && scrollRef.current.contains(e.target as Node)) return;
-      e.preventDefault();
-    };
-    document.addEventListener('touchmove', handler, { passive: false });
-    return () => document.removeEventListener('touchmove', handler);
-  }, []);
+    openModal();
+    return () => closeModal();
+  }, [openModal, closeModal]);
 
   const processFile = async (file: File) => {
     if (!file) return;
