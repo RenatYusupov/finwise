@@ -135,29 +135,81 @@ async function cloudGet(): Promise<string | null> {
   return chunks.join('');
 }
 
+/** Merge two persisted states: union of transactions/goals, keep higher streak */
+function mergeStates(
+  a: StorageValue<FinanceState>,
+  b: StorageValue<FinanceState>
+): StorageValue<FinanceState> {
+  const aState = a.state as FinanceState;
+  const bState = b.state as FinanceState;
+
+  // Union transactions by id
+  const txMap = new Map<string, Transaction>();
+  [...(aState.transactions ?? []), ...(bState.transactions ?? [])].forEach((t) =>
+    txMap.set(t.id, t)
+  );
+  const transactions = Array.from(txMap.values()).sort(
+    (x, y) => new Date(y.date).getTime() - new Date(x.date).getTime()
+  );
+
+  // Union goals by id
+  const goalMap = new Map<string, Goal>();
+  [...(aState.goals ?? []), ...(bState.goals ?? [])].forEach((g) =>
+    goalMap.set(g.id, g)
+  );
+  const goals = Array.from(goalMap.values());
+
+  // Keep higher streak
+  const streak = Math.max(aState.streak ?? 1, bState.streak ?? 1);
+  const lastActiveDate =
+    (aState.lastActiveDate ?? '') > (bState.lastActiveDate ?? '')
+      ? aState.lastActiveDate
+      : bState.lastActiveDate;
+
+  return {
+    ...a,
+    state: { ...aState, transactions, goals, streak, lastActiveDate },
+  };
+}
+
 /** Custom Zustand persist storage: localStorage (fast) + CloudStorage (cross-device sync) */
 const hybridStorage = {
   getItem: async (name: string): Promise<StorageValue<FinanceState> | null> => {
-    // 1. Try CloudStorage first (authoritative cross-device source)
+    const localRaw = localStorage.getItem(name);
+    let localParsed: StorageValue<FinanceState> | null = null;
+    try {
+      if (localRaw) localParsed = JSON.parse(localRaw) as StorageValue<FinanceState>;
+    } catch { /* ignore */ }
+
+    // Try CloudStorage
+    let cloudParsed: StorageValue<FinanceState> | null = null;
     try {
       const cloudRaw = await cloudGet();
-      if (cloudRaw) {
-        const parsed = JSON.parse(cloudRaw) as StorageValue<FinanceState>;
-        // Mirror to localStorage for fast subsequent reads
-        localStorage.setItem(name, cloudRaw);
-        return parsed;
-      }
-    } catch {
-      // CloudStorage unavailable or parse error — fall through to localStorage
+      if (cloudRaw) cloudParsed = JSON.parse(cloudRaw) as StorageValue<FinanceState>;
+    } catch { /* ignore */ }
+
+    if (cloudParsed && localParsed) {
+      // Both exist — merge (union of transactions + goals)
+      const merged = mergeStates(cloudParsed, localParsed);
+      const mergedStr = JSON.stringify(merged);
+      localStorage.setItem(name, mergedStr);
+      cloudSet(mergedStr).catch(() => {/* ignore */});
+      return merged;
     }
-    // 2. Fallback: localStorage
-    const raw = localStorage.getItem(name);
-    if (!raw) return null;
-    try {
-      return JSON.parse(raw) as StorageValue<FinanceState>;
-    } catch {
-      return null;
+
+    if (cloudParsed) {
+      // Only cloud — mirror to localStorage
+      localStorage.setItem(name, JSON.stringify(cloudParsed));
+      return cloudParsed;
     }
+
+    if (localParsed) {
+      // Only local — upload to CloudStorage so other devices get it
+      cloudSet(localRaw!).catch(() => {/* ignore */});
+      return localParsed;
+    }
+
+    return null;
   },
 
   setItem: async (name: string, value: StorageValue<FinanceState>): Promise<void> => {
