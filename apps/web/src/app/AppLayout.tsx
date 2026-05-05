@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { BottomNav } from '@/shared/ui/BottomNav';
@@ -17,18 +18,21 @@ export function AppLayout() {
   const modalOpenCount = useUIStore((s) => s.modalOpenCount);
   const isModalOpen = modalOpenCount > 0;
 
-  // Compute main className: when a modal is open, remove overflow-y-auto entirely
-  // so Telegram WebView has nothing to scroll in the background.
+  // When a modal is open: keep overflow-y-auto so the sheet's inner scroll works,
+  // but add touch-action:none + overscroll-behavior:none to prevent Telegram WebView
+  // from scrolling the background. The sheet's inner div has touch-action:pan-y to override.
   const mainClass = isFullHeight
     ? 'flex-1 min-h-0 flex flex-col overflow-hidden'
-    : isModalOpen
-      ? 'flex-1 min-h-0 overflow-hidden pb-20'
-      : 'flex-1 min-h-0 overflow-y-auto scroll-area pb-20';
+    : 'flex-1 min-h-0 overflow-y-auto scroll-area pb-20';
+
+  const mainStyle: CSSProperties = isModalOpen
+    ? { background: 'var(--bg-warm)', touchAction: 'none', overscrollBehavior: 'none' }
+    : { background: 'var(--bg-warm)' };
 
   return (
     <div className="flex flex-col h-full" style={{ background: 'var(--bg-warm)' }}>
       {/* Main content area */}
-      <main className={mainClass}>
+      <main className={mainClass} style={mainStyle}>
         <AnimatePresence mode="wait">
           <motion.div
             key={location.pathname}
