@@ -100,39 +100,60 @@ function splitChunks(str: string): string[] {
 /** Write value to Telegram CloudStorage (chunked) */
 async function cloudSet(value: string): Promise<void> {
   const cloud = tgCloud();
-  if (!cloud) return;
+  if (!cloud) {
+    console.log('[CloudStorage] not available for write');
+    return;
+  }
   const chunks = splitChunks(value);
-  // Store chunk count
-  await new Promise<void>((res) =>
-    cloud.setItem(`${CLOUD_KEY}_n`, String(chunks.length), () => res())
+  console.log(`[CloudStorage] writing ${chunks.length} chunks (${value.length} chars)`);
+  // Store chunk count first
+  await new Promise<void>((res, rej) =>
+    cloud.setItem(`${CLOUD_KEY}_n`, String(chunks.length), (err) => {
+      if (err) { console.warn('[CloudStorage] setItem _n error:', err); rej(err); }
+      else res();
+    })
   );
   await Promise.all(
     chunks.map(
       (chunk, i) =>
-        new Promise<void>((res) =>
-          cloud.setItem(`${CLOUD_KEY}_${i}`, chunk, () => res())
+        new Promise<void>((res, rej) =>
+          cloud.setItem(`${CLOUD_KEY}_${i}`, chunk, (err) => {
+            if (err) { console.warn(`[CloudStorage] setItem _${i} error:`, err); rej(err); }
+            else res();
+          })
         )
     )
   );
+  console.log('[CloudStorage] write complete');
 }
 
 /** Read value from Telegram CloudStorage (chunked) */
 async function cloudGet(): Promise<string | null> {
   const cloud = tgCloud();
-  if (!cloud) return null;
+  if (!cloud) {
+    console.log('[CloudStorage] not available for read');
+    return null;
+  }
   const n = await new Promise<string | null>((res) =>
-    cloud.getItem(`${CLOUD_KEY}_n`, (_err: unknown, val: string) => res(val ?? null))
+    cloud.getItem(`${CLOUD_KEY}_n`, (err: unknown, val: string) => {
+      if (err) console.warn('[CloudStorage] getItem _n error:', err);
+      res(val ?? null);
+    })
   );
+  console.log(`[CloudStorage] chunk count key = "${n}"`);
   if (!n) return null;
   const count = parseInt(n, 10);
   if (!count || isNaN(count)) return null;
   const keys = Array.from({ length: count }, (_, i) => `${CLOUD_KEY}_${i}`);
   const chunks = await new Promise<string[]>((res) =>
-    cloud.getItems(keys, (_err: unknown, vals: Record<string, string>) =>
-      res(keys.map((k) => vals[k] ?? ''))
-    )
+    cloud.getItems(keys, (err: unknown, vals: Record<string, string>) => {
+      if (err) console.warn('[CloudStorage] getItems error:', err);
+      res(keys.map((k) => vals[k] ?? ''));
+    })
   );
-  return chunks.join('');
+  const result = chunks.join('');
+  console.log(`[CloudStorage] read ${result.length} chars`);
+  return result || null;
 }
 
 /** Merge two persisted states: union of transactions/goals, keep higher streak */
@@ -175,21 +196,35 @@ function mergeStates(
 /** Custom Zustand persist storage: localStorage (fast) + CloudStorage (cross-device sync) */
 const hybridStorage = {
   getItem: async (name: string): Promise<StorageValue<FinanceState> | null> => {
+    console.log('[HybridStorage] getItem called, tgCloud=', !!tgCloud());
+
     const localRaw = localStorage.getItem(name);
     let localParsed: StorageValue<FinanceState> | null = null;
     try {
-      if (localRaw) localParsed = JSON.parse(localRaw) as StorageValue<FinanceState>;
+      if (localRaw) {
+        localParsed = JSON.parse(localRaw) as StorageValue<FinanceState>;
+        const txCount = (localParsed?.state as FinanceState)?.transactions?.length ?? 0;
+        console.log(`[HybridStorage] localStorage has ${txCount} transactions`);
+      }
     } catch { /* ignore */ }
 
     // Try CloudStorage
     let cloudParsed: StorageValue<FinanceState> | null = null;
     try {
       const cloudRaw = await cloudGet();
-      if (cloudRaw) cloudParsed = JSON.parse(cloudRaw) as StorageValue<FinanceState>;
-    } catch { /* ignore */ }
+      if (cloudRaw) {
+        cloudParsed = JSON.parse(cloudRaw) as StorageValue<FinanceState>;
+        const txCount = (cloudParsed?.state as FinanceState)?.transactions?.length ?? 0;
+        console.log(`[HybridStorage] CloudStorage has ${txCount} transactions`);
+      } else {
+        console.log('[HybridStorage] CloudStorage is empty');
+      }
+    } catch (e) {
+      console.warn('[HybridStorage] CloudStorage parse error:', e);
+    }
 
     if (cloudParsed && localParsed) {
-      // Both exist — merge (union of transactions + goals)
+      console.log('[HybridStorage] merging cloud + local');
       const merged = mergeStates(cloudParsed, localParsed);
       const mergedStr = JSON.stringify(merged);
       localStorage.setItem(name, mergedStr);
@@ -198,17 +233,18 @@ const hybridStorage = {
     }
 
     if (cloudParsed) {
-      // Only cloud — mirror to localStorage
+      console.log('[HybridStorage] using cloud only, mirroring to localStorage');
       localStorage.setItem(name, JSON.stringify(cloudParsed));
       return cloudParsed;
     }
 
     if (localParsed) {
-      // Only local — upload to CloudStorage so other devices get it
+      console.log('[HybridStorage] using local only, uploading to CloudStorage');
       cloudSet(localRaw!).catch(() => {/* ignore */});
       return localParsed;
     }
 
+    console.log('[HybridStorage] no data found anywhere');
     return null;
   },
 
@@ -217,7 +253,7 @@ const hybridStorage = {
     // Always write to localStorage immediately (synchronous UX)
     localStorage.setItem(name, str);
     // Write to CloudStorage asynchronously (cross-device sync)
-    cloudSet(str).catch(() => {/* ignore if unavailable */});
+    cloudSet(str).catch((e) => console.warn('[HybridStorage] cloudSet error:', e));
   },
 
   removeItem: async (name: string): Promise<void> => {
