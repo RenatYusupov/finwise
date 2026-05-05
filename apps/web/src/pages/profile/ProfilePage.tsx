@@ -20,49 +20,56 @@ const VALID_CATEGORY_IDS = new Set([
 ]);
 
 const GROQ_CATEGORIZE_PROMPT = `Ты финансовый ассистент. Тебе дан список банковских транзакций в формате JSON.
-Для каждой транзакции определи categoryId из списка ниже и верни ТОЛЬКО JSON массив с полями "idx" и "categoryId".
+Каждая транзакция содержит поля: idx (индекс), description (описание из банка), bankCategory (категория банка), type (expense/income).
+Используй ОБА поля — description И bankCategory — для определения категории.
+Верни ТОЛЬКО JSON массив с полями "idx" и "categoryId".
 
-КАТЕГОРИИ РАСХОДОВ:
-food — продукты, супермаркет, пятёрочка, магнит, вкусвилл
-transport — метро, такси, автобус, бензин, парковка, каршеринг
-shopping — одежда, wildberries, ozon, электроника, мвидео
-health — аптека, врач, клиника, стоматолог, лаборатория
-entertainment — кино, netflix, spotify, подписки, игры
-cafe — кофе, кафе, ресторан, доставка еды, фастфуд
-sport — фитнес, спортзал, бассейн, йога
-beauty — салон, маникюр, косметика, парикмахер
-home — аренда, ЖКХ, коммуналка, интернет, ремонт
-education — курсы, обучение, книги, репетитор
-travel — отель, авиабилет, путешествие, booking
-other_exp — прочие расходы
+КАТЕГОРИИ РАСХОДОВ (type=expense):
+food — продукты, супермаркет, пятёрочка, магнит, вкусвилл, лента, ашан, дикси, окей, глобус, fix price
+cafe — кофе, кафе, ресторан, бар, столовая, фастфуд, доставка еды, макдоналдс, kfc, бургер, пицца, суши, шаурма, самокат, яндекс еда, delivery
+transport — метро, такси, автобус, электричка, ржд, поезд, бензин, азс, парковка, каршеринг, яндекс такси, uber, ситидрайв, делимобиль, аэроэкспресс
+shopping — одежда, wildberries, ozon, lamoda, aliexpress, amazon, zara, h&m, uniqlo, adidas, nike, мвидео, эльдорадо, dns, ситилинк, икеа, леруа, спортмастер, декатлон, электроника, ювелирные
+health — аптека, лекарства, врач, клиника, больница, стоматолог, лаборатория, инвитро, гемотест, helix, 36.6, горздрав, ригла, оптика, медицин
+entertainment — кино, театр, концерт, netflix, spotify, яндекс плюс, apple music, youtube, steam, playstation, xbox, боулинг, музей, парк, аттракцион, кинопоиск, okko, иви
+sport — фитнес, спортзал, gym, бассейн, йога, тренажёр, world class, x-fit, alex fitness
+beauty — салон, маникюр, педикюр, парикмахер, барбер, косметика, л'этуаль, рив гош, золотое яблоко
+home — аренда, жкх, коммунал, квартплата, ипотека, электричество, газ, вода, отопление, интернет, мтс, мегафон, билайн, теле2, ростелеком, ремонт, мебель, уборка
+education — курсы, обучение, школа, университет, книги, литрес, skillbox, нетология, coursera, udemy, яндекс практикум, репетитор
+travel — отель, авиабилет, аэропорт, booking, airbnb, туту, aviasales, путешествие, экскурсия, туризм
+other_exp — всё остальное (расход), снятие наличных, банкомат, переводы физлицам без явной цели
 
-КАТЕГОРИИ ДОХОДОВ:
-salary — зарплата, аванс, оклад
-freelance — фриланс, подработка, гонорар
-gift — подарок
-investment — дивиденды, инвестиции, проценты по вкладу
-cashback — кэшбэк, возврат
-other_inc — прочие доходы
+КАТЕГОРИИ ДОХОДОВ (type=income):
+salary — зарплата, аванс, оклад, премия, зачисление зарплат
+freelance — фриланс, подработка, гонорар, проект
+gift — подарок, дарение
+investment — ТОЛЬКО реальный инвестиционный доход: дивиденды, купоны по облигациям, проценты по вкладу/депозиту. НЕ использовать для переводов на брокерский счёт или пополнения ИИС.
+cashback — кэшбэк, возврат средств, refund, возвраты к физику
+other_inc — прочие доходы, переводы от физлиц, пополнения счёта
 
-ВАЖНО: Верни ТОЛЬКО JSON массив. Никакого текста. Только [...].
-Пример: [{"idx":0,"categoryId":"food"},{"idx":1,"categoryId":"transport"}]`;
+ВАЖНЫЕ ПРАВИЛА:
+- Если bankCategory = "Финансовые операции" и type=expense — это скорее всего shopping или other_exp, НЕ investment
+- Если bankCategory = "Переводы" — это other_exp (расход) или other_inc (доход)
+- Пополнение брокерского счёта / ИИС — это other_exp, НЕ investment
+- investment только для ВХОДЯЩИХ дивидендов/процентов (type=income)
+
+ВАЖНО: Верни ТОЛЬКО JSON массив. Никакого текста до или после. Только [...].
+Пример: [{"idx":0,"categoryId":"food"},{"idx":1,"categoryId":"transport"},{"idx":2,"categoryId":"salary"}]`;
 
 async function recategorizeWithGroq(transactions: ParsedBankTx[]): Promise<ParsedBankTx[]> {
-  // Only recategorize "other" transactions — specific ones are already correct
-  const ambiguous = transactions
-    .map((tx, idx) => ({ idx, tx }))
-    .filter(({ tx }) => tx.categoryId === 'other_exp' || tx.categoryId === 'other_inc');
+  if (transactions.length === 0) return transactions;
 
-  if (ambiguous.length === 0) return transactions;
-
+  // Categorize ALL transactions via Groq — no keyword pre-filter
+  // Send in batches of 30 to stay within token limits
   const BATCH_SIZE = 30;
   const result: ParsedBankTx[] = [...transactions];
 
-  for (let i = 0; i < ambiguous.length; i += BATCH_SIZE) {
-    const batch = ambiguous.slice(i, i + BATCH_SIZE);
-    const payload = batch.map(({ idx, tx }) => ({
-      idx,
+  for (let i = 0; i < transactions.length; i += BATCH_SIZE) {
+    const batch = transactions.slice(i, i + BATCH_SIZE);
+    // Pass both description AND bankCategory so Groq has full context
+    const payload = batch.map((tx, batchIdx) => ({
+      idx: i + batchIdx,
       description: tx.description,
+      bankCategory: tx.bankCategory,
       type: tx.type,
     }));
 
@@ -80,7 +87,7 @@ async function recategorizeWithGroq(transactions: ParsedBankTx[]): Promise<Parse
             { role: 'user', content: JSON.stringify(payload) },
           ],
           temperature: 0.1,
-          max_tokens: 512,
+          max_tokens: 1024,
         }),
       });
 
@@ -112,6 +119,7 @@ async function recategorizeWithGroq(transactions: ParsedBankTx[]): Promise<Parse
             type: orig.type,
             amount: orig.amount,
             description: orig.description,
+            bankCategory: orig.bankCategory,
             date: orig.date,
             categoryId: item.categoryId,
           };

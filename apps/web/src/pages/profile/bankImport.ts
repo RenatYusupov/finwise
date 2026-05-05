@@ -1,48 +1,7 @@
-// ─── Smart Category Detection ─────────────────────────────────────────────────
-
-const CATEGORY_RULES: Array<{ keywords: string[]; categoryId: string }> = [
-  { keywords: ['пятёрочка', 'пятерочка', 'перекрёсток', 'перекресток', 'магнит', 'лента', 'ашан', 'дикси', 'вкусвилл', 'metro', 'продукты', 'гипермаркет', 'fix price', 'фикс прайс', 'красное белое', 'бристоль', 'азбука вкуса', 'spar', 'окей', 'глобус', 'верный', 'светофор', 'чижик'], categoryId: 'food' },
-  { keywords: ['кафе', 'ресторан', 'кофе', 'coffee', 'starbucks', 'макдоналдс', 'бургер', 'kfc', 'пицца', 'pizza', 'суши', 'sushi', 'бар', 'паб', 'столовая', 'шоколадница', 'якитория', 'тануки', 'додо', 'вкусно и точка', 'subway', 'шаурма', 'delivery club', 'яндекс еда', 'самокат'], categoryId: 'cafe' },
-  { keywords: ['такси', 'taxi', 'яндекс.такси', 'uber', 'метро', 'автобус', 'электричка', 'ржд', 'поезд', 'бензин', 'азс', 'лукойл', 'газпром', 'роснефть', 'парковка', 'каршеринг', 'яндекс драйв', 'ситидрайв', 'делимобиль', 'мосметро', 'тройка', 'аэроэкспресс'], categoryId: 'transport' },
-  { keywords: ['wildberries', 'вайлдберриз', 'ozon', 'озон', 'lamoda', 'ламода', 'aliexpress', 'amazon', 'h&m', 'zara', 'uniqlo', 'adidas', 'nike', 'мвидео', 'м.видео', 'эльдорадо', 'dns', 'ситилинк', 'ikea', 'икеа', 'леруа', 'leroy', 'obi', 'спортмастер', 'декатлон', 'sunlight', 'sokolov'], categoryId: 'shopping' },
-  { keywords: ['аптека', 'pharmacy', 'стоматолог', 'врач', 'клиника', 'больница', 'лаборатория', 'инвитро', 'гемотест', 'helix', '36.6', 'горздрав', 'ригла', 'планета здоровья', 'витамин', 'линзы', 'оптика', 'медицин'], categoryId: 'health' },
-  { keywords: ['кино', 'кинотеатр', 'театр', 'концерт', 'netflix', 'spotify', 'яндекс плюс', 'яндекс музыка', 'apple music', 'youtube', 'steam', 'playstation', 'xbox', 'развлечен', 'парк', 'музей', 'боулинг', 'караоке', 'vk music', 'иви', 'ivi', 'кинопоиск', 'okko', 'wink', 'premier'], categoryId: 'entertainment' },
-  { keywords: ['фитнес', 'fitness', 'спортзал', 'gym', 'тренажёр', 'тренажер', 'бассейн', 'йога', 'world class', 'x-fit', 'alex fitness'], categoryId: 'sport' },
-  { keywords: ['красота', 'beauty', 'парикмахер', 'барбер', 'маникюр', 'педикюр', 'салон', 'косметик', 'л\'этуаль', 'рив гош', 'золотое яблоко'], categoryId: 'beauty' },
-  { keywords: ['коммунал', 'жкх', 'квартплата', 'аренда', 'rent', 'ипотека', 'электричество', 'газ', 'вода', 'отопление', 'интернет', 'мтс', 'мегафон', 'билайн', 'теле2', 'ростелеком', 'домофон', 'уборка', 'ремонт', 'мебель'], categoryId: 'home' },
-  { keywords: ['учёба', 'учеба', 'курс', 'школа', 'университет', 'книга', 'литрес', 'skillbox', 'нетология', 'geekbrains', 'coursera', 'udemy', 'stepik', 'яндекс практикум', 'репетитор'], categoryId: 'education' },
-  { keywords: ['путешеств', 'travel', 'отель', 'hotel', 'авиабилет', 'аэропорт', 'booking', 'airbnb', 'островок', 'туту', 'aviasales', 'экскурсия'], categoryId: 'travel' },
-  { keywords: ['зарплата', 'salary', 'аванс', 'оклад', 'премия', 'зачисление зарплат'], categoryId: 'salary' },
-  { keywords: ['фриланс', 'freelance', 'гонорар', 'подработка'], categoryId: 'freelance' },
-  { keywords: ['кэшбэк', 'cashback', 'кешбэк', 'возврат', 'refund', 'возвраты к физику'], categoryId: 'cashback' },
-  { keywords: ['инвестиц', 'invest', 'дивиденд', 'акции', 'облигации', 'брокер', 'процент по вклад', 'депозит'], categoryId: 'investment' },
-  { keywords: ['подарок', 'gift', 'дарение'], categoryId: 'gift' },
-  { keywords: ['снятие наличных', 'банкомат', 'atm', 'alfa iss'], categoryId: 'other_exp' },
-];
-
-function detectCategory(description: string, bankCategory: string, amount: number): { categoryId: string; type: 'expense' | 'income' } {
-  const desc = description.toLowerCase();
-  const bankCat = bankCategory.toLowerCase();
-  const isExpense = amount < 0;
-
-  // Skip internal transfers
-  if (desc.includes('внутрибанковский перевод') || desc.includes('между счетами')) {
-    return { categoryId: '_transfer', type: isExpense ? 'expense' : 'income' };
-  }
-
-  for (const rule of CATEGORY_RULES) {
-    for (const kw of rule.keywords) {
-      if (desc.includes(kw) || bankCat.includes(kw)) {
-        return { categoryId: rule.categoryId, type: isExpense ? 'expense' : 'income' };
-      }
-    }
-  }
-
-  if (bankCat.includes('снятие наличных')) return { categoryId: 'other_exp', type: 'expense' };
-  if (bankCat.includes('финансовые операции') && isExpense) return { categoryId: 'shopping', type: 'expense' };
-
-  return { categoryId: isExpense ? 'other_exp' : 'other_inc', type: isExpense ? 'expense' : 'income' };
-}
+// ─── Bank XLSX / CSV Parser ───────────────────────────────────────────────────
+// Category detection is fully delegated to Groq LLM (see ProfilePage.tsx).
+// This module only handles file parsing, amount/date normalisation, and
+// description cleanup. All transactions are initially tagged other_exp/other_inc.
 
 function parseAmount(raw: string | number | null | undefined): number {
   if (raw == null) return 0;
@@ -63,6 +22,8 @@ export interface ParsedBankTx {
   amount: number;
   categoryId: string;
   description: string;
+  /** Raw bank category string — passed to Groq for better classification */
+  bankCategory: string;
   date: string;
 }
 
@@ -80,7 +41,9 @@ async function loadSheetJS(): Promise<any> {
   return (window as any).__XLSX__;
 }
 
-export async function parseBankXLSX(buffer: ArrayBuffer): Promise<{ transactions: ParsedBankTx[]; bankName: string; skipped: number }> {
+export async function parseBankXLSX(
+  buffer: ArrayBuffer
+): Promise<{ transactions: ParsedBankTx[]; bankName: string; skipped: number }> {
   const XLSX = await loadSheetJS();
   const wb = XLSX.read(buffer, { type: 'array' });
   const ws = wb.Sheets[wb.SheetNames[0]];
@@ -142,9 +105,22 @@ export async function parseBankXLSX(buffer: ArrayBuffer): Promise<{ transactions
     const amount = parseAmount(amountRaw);
     if (amount === 0) { skipped++; continue; }
 
-    const { categoryId, type } = detectCategory(descRaw, bankCategoryRaw, amount);
-    if (categoryId === '_transfer') { skipped++; continue; }
+    // Skip internal bank transfers
+    const descLower = descRaw.toLowerCase();
+    const bankCatLower = bankCategoryRaw.toLowerCase();
+    if (
+      descLower.includes('внутрибанковский перевод') ||
+      descLower.includes('между счетами') ||
+      bankCatLower.includes('внутрибанковский') ||
+      bankCatLower.includes('между счетами')
+    ) {
+      skipped++;
+      continue;
+    }
 
+    const type: 'expense' | 'income' = amount < 0 ? 'expense' : 'income';
+
+    // Clean up description — remove technical noise
     let shortDesc = descRaw;
     shortDesc = shortDesc.replace(/^Категория:\s*[^.]+\.\s*/i, '');
     shortDesc = shortDesc.replace(/[A-Z]\d{10,}/g, '');
@@ -160,8 +136,10 @@ export async function parseBankXLSX(buffer: ArrayBuffer): Promise<{ transactions
     transactions.push({
       type,
       amount: Math.abs(amount),
-      categoryId,
+      // Placeholder — will be replaced by Groq in ProfilePage
+      categoryId: type === 'expense' ? 'other_exp' : 'other_inc',
       description: shortDesc,
+      bankCategory: bankCategoryRaw,
       date: parseRuDate(String(dateRaw)),
     });
   }
@@ -169,7 +147,9 @@ export async function parseBankXLSX(buffer: ArrayBuffer): Promise<{ transactions
   return { transactions, bankName, skipped };
 }
 
-function parseFallbackXLSX(allRows: any[][]): { transactions: ParsedBankTx[]; bankName: string; skipped: number } {
+function parseFallbackXLSX(
+  allRows: any[][]
+): { transactions: ParsedBankTx[]; bankName: string; skipped: number } {
   if (allRows.length < 2) return { transactions: [], bankName: 'Файл', skipped: 0 };
   const headers = (allRows[0] || []).map((h: any) => String(h ?? '').toLowerCase().trim());
   const transactions: ParsedBankTx[] = [];
@@ -190,15 +170,17 @@ function parseFallbackXLSX(allRows: any[][]): { transactions: ParsedBankTx[]; ba
 export function rowToTransactionGeneric(row: Record<string, string>): ParsedBankTx | null {
   const type = (row['type'] ?? row['тип'] ?? '').toLowerCase();
   if (type !== 'expense' && type !== 'income' && type !== 'расход' && type !== 'доход') return null;
-  const normalizedType: 'expense' | 'income' = (type === 'расход') ? 'expense' : (type === 'доход') ? 'income' : type as 'expense' | 'income';
+  const normalizedType: 'expense' | 'income' =
+    type === 'расход' ? 'expense' : type === 'доход' ? 'income' : (type as 'expense' | 'income');
   const amountRaw = row['amount'] ?? row['сумма'] ?? '';
   const amount = parseFloat(amountRaw.replace(/\s/g, '').replace(',', '.'));
   if (!amount || amount <= 0) return null;
-  const categoryId = row['categoryid'] ?? row['category'] ?? row['категория'] ?? 'other';
+  const categoryId = row['categoryid'] ?? row['category'] ?? row['категория'] ?? 'other_exp';
   const description = row['description'] ?? row['описание'] ?? row['comment'] ?? '';
+  const bankCategory = row['bankcategory'] ?? row['банккатегория'] ?? '';
   const dateRaw = row['date'] ?? row['дата'] ?? '';
   const date = dateRaw ? parseRuDate(dateRaw) : new Date().toISOString();
-  return { type: normalizedType, amount, categoryId, description, date };
+  return { type: normalizedType, amount, categoryId, description, bankCategory, date };
 }
 
 export function parseCSV(text: string): Array<Record<string, string>> {
