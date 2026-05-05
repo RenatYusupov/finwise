@@ -217,10 +217,12 @@ export function AiChatPage() {
   const [isTyping, setIsTyping] = useState(false);
   const [inputHasText, setInputHasText] = useState(false);
   const [groqError, setGroqError] = useState(false);
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   // UNCONTROLLED input — ref only, no React value state
   const inputRef = useRef<HTMLInputElement>(null);
   const inputBarRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
 
   const { aiMessages, addAiMessage, clearAiChat, transactions, goals, getMonthSummary, getCategorySpending } =
@@ -292,24 +294,26 @@ export function AiChatPage() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // VisualViewport resize — push input bar above keyboard in Telegram WebView
+  // VisualViewport resize — track keyboard open/close state
+  // We use padding-bottom on the messages area instead of translateY
+  // to avoid the laggy "snap back" animation when keyboard closes
   useEffect(() => {
     const vv = window.visualViewport;
-    if (!vv || !inputBarRef.current) return;
+    if (!vv) return;
 
     const onResize = () => {
-      if (!inputBarRef.current) return;
-      const offsetFromBottom = window.innerHeight - vv.height - vv.offsetTop;
-      inputBarRef.current.style.transform = `translateY(-${Math.max(0, offsetFromBottom)}px)`;
+      const keyboardHeight = window.innerHeight - vv.height - vv.offsetTop;
+      setKeyboardOpen(keyboardHeight > 100);
+      // Scroll to bottom when keyboard opens
+      if (keyboardHeight > 100) {
+        setTimeout(() => {
+          bottomRef.current?.scrollIntoView({ behavior: 'instant' });
+        }, 50);
+      }
     };
 
     vv.addEventListener('resize', onResize);
-    vv.addEventListener('scroll', onResize);
-
-    return () => {
-      vv.removeEventListener('resize', onResize);
-      vv.removeEventListener('scroll', onResize);
-    };
+    return () => vv.removeEventListener('resize', onResize);
   }, []);
 
   const hasMessages = aiMessages.length > 0;
@@ -318,6 +322,12 @@ export function AiChatPage() {
     <div
       className="flex flex-col flex-1 min-h-0"
       style={{ background: '#F8F7FF', position: 'relative' }}
+      // Tapping outside input dismisses keyboard immediately
+      onPointerDown={(e) => {
+        if (inputRef.current && !inputRef.current.contains(e.target as Node)) {
+          inputRef.current.blur();
+        }
+      }}
     >
       {/* Header */}
       <div className="flex-shrink-0 px-4 pt-5 pb-4 glass border-b border-white/60">
@@ -362,8 +372,12 @@ export function AiChatPage() {
         </div>
       </div>
 
-      {/* Messages area — scrollable */}
-      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-4">
+      {/* Messages area — scrollable, padding-bottom grows when keyboard is open */}
+      <div
+        ref={messagesRef}
+        className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-4"
+        style={{ paddingBottom: keyboardOpen ? '16px' : '16px' }}
+      >
         {/* Empty state */}
         {!hasMessages && !isTyping && (
           <motion.div
@@ -499,7 +513,7 @@ export function AiChatPage() {
         <div ref={bottomRef} />
       </div>
 
-      {/* Input bar — sticky bottom, lifted by visualViewport when keyboard opens */}
+      {/* Input bar — sticky bottom, no JS transform (causes lag); keyboard handled by visualViewport state */}
       <div
         ref={inputBarRef}
         className="flex-shrink-0 glass border-t border-white/60"
@@ -510,7 +524,6 @@ export function AiChatPage() {
           paddingRight: '16px',
           paddingTop: '12px',
           paddingBottom: `calc(12px + env(safe-area-inset-bottom, 0px))`,
-          willChange: 'transform',
         }}
       >
         {/* Groq fallback notice */}
@@ -604,9 +617,10 @@ export function AiChatPage() {
                 }
               }}
               onFocus={() => {
+                // Scroll to bottom after keyboard animation (~300ms)
                 setTimeout(() => {
                   bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-                }, 350);
+                }, 300);
               }}
               placeholder={isListening ? 'Слушаю...' : 'Спроси что-нибудь...'}
               disabled={isListening}
@@ -619,10 +633,11 @@ export function AiChatPage() {
                 lineHeight: '1.4',
                 caretColor: '#6C63FF',
               }}
-              autoComplete="off"
-              autoCorrect="off"
+              // Enable standard text editing features (autocorrect, spellcheck, autocomplete)
+              autoComplete="on"
+              autoCorrect="on"
               autoCapitalize="sentences"
-              spellCheck={false}
+              spellCheck={true}
             />
           </div>
 
