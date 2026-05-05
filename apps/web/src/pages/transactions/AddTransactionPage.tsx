@@ -4,94 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useFinanceStore, EXPENSE_CATEGORIES, INCOME_CATEGORIES, type TransactionType } from '@/features/finance/store';
 import { parseTransactionsWithGroq, type GroqParsedTx } from '@/features/ai/groqParser';
 
-// ─── Regex fallback parser (used when Groq is unavailable) ──────────────────
-
-interface ParsedTx extends GroqParsedTx {}
-
-const EXPENSE_KEYWORDS: Record<string, string[]> = {
-  food: ['еда', 'продукт', 'магазин', 'супермаркет', 'пятёрочка', 'пятерочка', 'перекрёсток', 'перекресток', 'лента', 'ашан', 'вкусвилл', 'дикси', 'магнит', 'окей'],
-  cafe: ['кофе', 'кафе', 'ресторан', 'бар', 'пицца', 'суши', 'бургер', 'фастфуд', 'старбакс', 'шаурма', 'обед', 'ужин', 'завтрак', 'перекус'],
-  transport: ['метро', 'автобус', 'такси', 'убер', 'каршеринг', 'бензин', 'заправка', 'парковка', 'электричка', 'трамвай'],
-  shopping: ['одежда', 'обувь', 'покупка', 'зара', 'wildberries', 'озон', 'ozon', 'wb', 'маркетплейс'],
-  health: ['аптека', 'лекарство', 'врач', 'больница', 'клиника', 'анализ', 'таблетки', 'витамины'],
-  entertainment: ['кино', 'театр', 'концерт', 'игра', 'подписка', 'нетфликс', 'netflix', 'spotify', 'стриминг'],
-  sport: ['спортзал', 'фитнес', 'тренировка', 'бассейн', 'йога', 'спорт'],
-  home: ['квартира', 'аренда', 'коммуналка', 'жкх', 'интернет', 'телефон', 'ремонт', 'мебель', 'икеа'],
-  beauty: ['салон', 'парикмахер', 'маникюр', 'косметика', 'уход'],
-  education: ['курс', 'обучение', 'книга', 'учёба', 'университет', 'школа'],
-  travel: ['отель', 'гостиница', 'авиа', 'билет', 'путешествие', 'туризм', 'airbnb'],
-};
-
-const INCOME_KEYWORDS = ['зарплата', 'аванс', 'премия', 'доход', 'получил', 'получила', 'заработал', 'заработала', 'фриланс', 'подработка', 'возврат', 'кэшбэк'];
-
-function detectCategoryFromText(text: string): string {
-  const lower = text.toLowerCase();
-  for (const [catId, keywords] of Object.entries(EXPENSE_KEYWORDS)) {
-    if (keywords.some((kw) => lower.includes(kw))) return catId;
-  }
-  return 'other_exp';
-}
-
-function detectTypeFromText(text: string): TransactionType {
-  const lower = text.toLowerCase();
-  if (INCOME_KEYWORDS.some((kw) => lower.includes(kw))) return 'income';
-  return 'expense';
-}
-
-function detectIncomeCategoryFromText(text: string): string {
-  const lower = text.toLowerCase();
-  if (lower.includes('зарплат') || lower.includes('аванс')) return 'salary';
-  if (lower.includes('фриланс') || lower.includes('подработ')) return 'freelance';
-  if (lower.includes('кэшбэк') || lower.includes('возврат')) return 'cashback';
-  if (lower.includes('подарок') || lower.includes('подарили')) return 'gift';
-  return 'other_inc';
-}
-
-function parseVoiceFallback(text: string): ParsedTx[] {
-  const results: ParsedTx[] = [];
-  const segments = text
-    .split(/\s+(?:и|а также|плюс|ещё|еще|,|;)\s+/i)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  for (const segment of segments) {
-    const amountMatch = segment.match(/(\d[\d\s]*(?:[.,]\d+)?)\s*(?:рублей|рубля|руб|₽|р\.?|тысяч|тыс\.?|к\b)?/i);
-    if (!amountMatch) continue;
-    let amount = parseFloat(amountMatch[1]!.replace(/\s/g, '').replace(',', '.'));
-    if (!amount || amount <= 0) continue;
-    if (/тысяч|тыс\.?|к\b/i.test(amountMatch[0]!)) amount *= 1000;
-
-    const type = detectTypeFromText(segment);
-    const categoryId = type === 'income' ? detectIncomeCategoryFromText(segment) : detectCategoryFromText(segment);
-    const description = segment
-      .replace(/(\d[\d\s]*(?:[.,]\d+)?)\s*(?:рублей|рубля|руб|₽|р\.?|тысяч|тыс\.?|к\b)?/gi, '')
-      .replace(/^(?:потратил|потратила|заплатил|заплатила|купил|купила|оплатил|оплатила|на|за|в|у|по)\s+/gi, '')
-      .replace(/\s{2,}/g, ' ')
-      .trim();
-
-    results.push({ type, amount, categoryId, description: description || segment.trim() });
-  }
-
-  if (results.length === 0) {
-    const amountMatch = text.match(/(\d[\d\s]*(?:[.,]\d+)?)/);
-    if (amountMatch) {
-      const amount = parseFloat(amountMatch[1]!.replace(/\s/g, '').replace(',', '.'));
-      if (amount > 0) {
-        const type = detectTypeFromText(text);
-        results.push({
-          type,
-          amount,
-          categoryId: type === 'income' ? detectIncomeCategoryFromText(text) : detectCategoryFromText(text),
-          description: text.replace(/\d[\d\s]*(?:[.,]\d+)?/g, '').replace(/рублей|рубля|руб|₽|р\./gi, '').trim(),
-        });
-      }
-    }
-  }
-
-  return results;
-}
-
-// ─── Component ───────────────────────────────────────────────────────────────
+type ParsedTx = GroqParsedTx;
 
 export function AddTransactionPage() {
   const navigate = useNavigate();
@@ -107,7 +20,6 @@ export function AddTransactionPage() {
   const [parsedTxs, setParsedTxs] = useState<ParsedTx[] | null>(null);
   const [isParsing, setIsParsing] = useState(false);
   const [parseError, setParseError] = useState('');
-  const [usedGroq, setUsedGroq] = useState(false);
 
   const categories = type === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
   const isExpense = type === 'expense';
@@ -127,7 +39,7 @@ export function AddTransactionPage() {
     navigate(-1);
   };
 
-  // Parse dictated text — try Groq first, fallback to regex
+  // Parse via Groq LLM only
   const handleDictateParse = async () => {
     const text = dictateText.trim();
     if (!text) return;
@@ -136,27 +48,16 @@ export function AddTransactionPage() {
     setParseError('');
     setParsedTxs(null);
 
-    // Try Groq LLM first
-    let txs: ParsedTx[] | null = null;
-    try {
-      txs = await parseTransactionsWithGroq(text);
-      if (txs) setUsedGroq(true);
-    } catch {
-      txs = null;
-    }
-
-    // Fallback to regex parser
-    if (!txs || txs.length === 0) {
-      txs = parseVoiceFallback(text);
-      setUsedGroq(false);
-    }
+    const result = await parseTransactionsWithGroq(text);
 
     setIsParsing(false);
 
-    if (txs.length > 0) {
-      setParsedTxs(txs);
+    if (result && result.length > 0) {
+      setParsedTxs(result);
     } else {
-      setParseError('Не удалось распознать сумму. Попробуйте написать иначе, например: «500 на кофе»');
+      setParseError(
+        'Не удалось распознать операции. Проверьте подключение к интернету и попробуйте ещё раз.'
+      );
     }
   };
 
@@ -209,7 +110,7 @@ export function AddTransactionPage() {
           <h1 className="text-lg font-bold text-gray-900 flex-1">Голосовой ввод</h1>
           <div className="text-xs px-2 py-1 rounded-full font-medium"
             style={{ background: 'rgba(108,99,255,0.1)', color: '#6C63FF' }}>
-            AI
+            Groq AI
           </div>
         </div>
 
@@ -225,7 +126,7 @@ export function AddTransactionPage() {
             <div className="space-y-1.5">
               {[
                 'потратил 500 на кофе',
-                'кофе 200 и метро 50 и обед 400',
+                'я с утра попил кофе за 500 потом пообедал за 600',
                 'купил продукты на 1500 и такси 350',
                 'зарплата 80000',
               ].map((ex) => (
@@ -247,7 +148,7 @@ export function AddTransactionPage() {
             <textarea
               value={dictateText}
               onChange={(e) => { setDictateText(e.target.value); setParsedTxs(null); setParseError(''); }}
-              placeholder="Например: потратил 500 на кофе и 200 на метро..."
+              placeholder="Например: я с утра попил кофе за 500 потом пообедал за 600..."
               rows={4}
               className="w-full bg-transparent outline-none text-sm text-gray-800 placeholder-gray-300 resize-none"
               style={{ fontSize: '16px', lineHeight: '1.5', border: 'none' }}
@@ -276,20 +177,25 @@ export function AddTransactionPage() {
                   >
                     ⏳
                   </motion.span>
-                  Анализирую...
+                  Анализирую через AI...
                 </span>
               ) : (
-                '🤖 Распознать операции'
+                '🤖 Распознать через Groq AI'
               )}
             </motion.button>
           )}
 
           {/* Error */}
           {parseError && (
-            <div className="text-center text-sm text-gray-400 py-3 px-4 bg-white rounded-2xl mb-4"
-              style={{ boxShadow: 'var(--shadow-card)' }}>
-              {parseError}
-            </div>
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="text-sm text-orange-700 py-3 px-4 rounded-2xl mb-4 flex items-start gap-2"
+              style={{ background: 'rgba(255,152,0,0.1)' }}
+            >
+              <span className="flex-shrink-0">⚠️</span>
+              <span>{parseError}</span>
+            </motion.div>
           )}
 
           {/* Parsed results */}
@@ -300,12 +206,10 @@ export function AddTransactionPage() {
                   <div className="text-sm font-semibold text-gray-700">
                     ✅ Распознано {parsedTxs.length} {parsedTxs.length === 1 ? 'операция' : parsedTxs.length < 5 ? 'операции' : 'операций'}
                   </div>
-                  {usedGroq && (
-                    <div className="text-xs px-2 py-0.5 rounded-full font-medium"
-                      style={{ background: 'rgba(108,99,255,0.1)', color: '#6C63FF' }}>
-                      Groq AI
-                    </div>
-                  )}
+                  <div className="text-xs px-2 py-0.5 rounded-full font-medium"
+                    style={{ background: 'rgba(108,99,255,0.1)', color: '#6C63FF' }}>
+                    Groq AI
+                  </div>
                 </div>
 
                 <div className="space-y-2 mb-4">
