@@ -31,11 +31,26 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
     onClose();
   };
 
-  // Lock the <main> scroll container when sheet is open
+  // iOS/WebView scroll lock: position:fixed removes element from scroll flow entirely.
   useEffect(() => {
-    const main = document.querySelector('main');
-    if (main) main.classList.add('sheet-open');
-    return () => { if (main) main.classList.remove('sheet-open'); };
+    const main = document.querySelector('main') as HTMLElement | null;
+    if (!main) return;
+    const scrollY = main.scrollTop;
+    const prevPosition = main.style.position;
+    const prevTop = main.style.top;
+    const prevWidth = main.style.width;
+    const prevOverflow = main.style.overflow;
+    main.style.position = 'fixed';
+    main.style.top = `-${scrollY}px`;
+    main.style.width = '100%';
+    main.style.overflow = 'hidden';
+    return () => {
+      main.style.position = prevPosition;
+      main.style.top = prevTop;
+      main.style.width = prevWidth;
+      main.style.overflow = prevOverflow;
+      main.scrollTop = scrollY;
+    };
   }, []);
 
   return (
@@ -191,11 +206,26 @@ function AddToGoalModal({ goalId, goalName, goalColor, onClose }: {
     onClose();
   };
 
-  // Lock the <main> scroll container when sheet is open
+  // iOS/WebView scroll lock: position:fixed removes element from scroll flow entirely.
   useEffect(() => {
-    const main = document.querySelector('main');
-    if (main) main.classList.add('sheet-open');
-    return () => { if (main) main.classList.remove('sheet-open'); };
+    const main = document.querySelector('main') as HTMLElement | null;
+    if (!main) return;
+    const scrollY = main.scrollTop;
+    const prevPosition = main.style.position;
+    const prevTop = main.style.top;
+    const prevWidth = main.style.width;
+    const prevOverflow = main.style.overflow;
+    main.style.position = 'fixed';
+    main.style.top = `-${scrollY}px`;
+    main.style.width = '100%';
+    main.style.overflow = 'hidden';
+    return () => {
+      main.style.position = prevPosition;
+      main.style.top = prevTop;
+      main.style.width = prevWidth;
+      main.style.overflow = prevOverflow;
+      main.scrollTop = scrollY;
+    };
   }, []);
 
   return (
