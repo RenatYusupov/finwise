@@ -154,32 +154,20 @@ type ImportResult = { imported: number; skipped: number; errors: string[]; bankN
 function FileImportModal({ onClose }: { onClose: () => void }) {
   const { addTransaction } = useFinanceStore();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStep, setProcessingStep] = useState('');
   const [dragOver, setDragOver] = useState(false);
 
-  // Lock the <main> scroll container when sheet is open.
-  // iOS/WebView scroll lock: position:fixed removes element from scroll flow entirely.
+  // Telegram WebView scroll lock: block touchmove on document except inside the sheet's scrollable div.
   useEffect(() => {
-    const main = document.querySelector('main') as HTMLElement | null;
-    if (!main) return;
-    const scrollY = main.scrollTop;
-    const prevPosition = main.style.position;
-    const prevTop = main.style.top;
-    const prevWidth = main.style.width;
-    const prevOverflow = main.style.overflow;
-    main.style.position = 'fixed';
-    main.style.top = `-${scrollY}px`;
-    main.style.width = '100%';
-    main.style.overflow = 'hidden';
-    return () => {
-      main.style.position = prevPosition;
-      main.style.top = prevTop;
-      main.style.width = prevWidth;
-      main.style.overflow = prevOverflow;
-      main.scrollTop = scrollY;
+    const handler = (e: TouchEvent) => {
+      if (scrollRef.current && scrollRef.current.contains(e.target as Node)) return;
+      e.preventDefault();
     };
+    document.addEventListener('touchmove', handler, { passive: false });
+    return () => document.removeEventListener('touchmove', handler);
   }, []);
 
   const processFile = async (file: File) => {
@@ -297,6 +285,7 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
 
         {/* Scrollable content area */}
         <div
+          ref={scrollRef}
           className="flex-1 overflow-y-auto px-6 pb-8"
           style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain', touchAction: 'pan-y' }}
         >

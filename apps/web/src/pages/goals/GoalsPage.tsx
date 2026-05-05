@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useFinanceStore } from '@/features/finance/store';
 import { formatCurrency } from '@/shared/utils/format';
@@ -11,6 +11,7 @@ const GOAL_COLORS = [
 
 function AddGoalModal({ onClose }: { onClose: () => void }) {
   const { addGoal } = useFinanceStore();
+  const scrollRef = useRef<HTMLDivElement>(null);
   const [name, setName] = useState('');
   const [targetAmount, setTargetAmount] = useState('');
   const [currentAmount, setCurrentAmount] = useState('');
@@ -31,26 +32,14 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
     onClose();
   };
 
-  // iOS/WebView scroll lock: position:fixed removes element from scroll flow entirely.
+  // Telegram WebView scroll lock: block touchmove on document except inside the sheet's scrollable div.
   useEffect(() => {
-    const main = document.querySelector('main') as HTMLElement | null;
-    if (!main) return;
-    const scrollY = main.scrollTop;
-    const prevPosition = main.style.position;
-    const prevTop = main.style.top;
-    const prevWidth = main.style.width;
-    const prevOverflow = main.style.overflow;
-    main.style.position = 'fixed';
-    main.style.top = `-${scrollY}px`;
-    main.style.width = '100%';
-    main.style.overflow = 'hidden';
-    return () => {
-      main.style.position = prevPosition;
-      main.style.top = prevTop;
-      main.style.width = prevWidth;
-      main.style.overflow = prevOverflow;
-      main.scrollTop = scrollY;
+    const handler = (e: TouchEvent) => {
+      if (scrollRef.current && scrollRef.current.contains(e.target as Node)) return;
+      e.preventDefault();
     };
+    document.addEventListener('touchmove', handler, { passive: false });
+    return () => document.removeEventListener('touchmove', handler);
   }, []);
 
   return (
@@ -78,6 +67,7 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
 
         {/* Scrollable content */}
         <div
+          ref={scrollRef}
           className="flex-1 overflow-y-auto px-6 pb-8"
           style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain', touchAction: 'pan-y' }}
         >
@@ -197,6 +187,7 @@ function AddToGoalModal({ goalId, goalName, goalColor, onClose }: {
   goalId: string; goalName: string; goalColor: string; onClose: () => void
 }) {
   const { addToGoal } = useFinanceStore();
+  const scrollRef = useRef<HTMLDivElement>(null);
   const [amount, setAmount] = useState('');
 
   const handleAdd = () => {
@@ -206,26 +197,14 @@ function AddToGoalModal({ goalId, goalName, goalColor, onClose }: {
     onClose();
   };
 
-  // iOS/WebView scroll lock: position:fixed removes element from scroll flow entirely.
+  // Telegram WebView scroll lock: block touchmove on document except inside the sheet's scrollable div.
   useEffect(() => {
-    const main = document.querySelector('main') as HTMLElement | null;
-    if (!main) return;
-    const scrollY = main.scrollTop;
-    const prevPosition = main.style.position;
-    const prevTop = main.style.top;
-    const prevWidth = main.style.width;
-    const prevOverflow = main.style.overflow;
-    main.style.position = 'fixed';
-    main.style.top = `-${scrollY}px`;
-    main.style.width = '100%';
-    main.style.overflow = 'hidden';
-    return () => {
-      main.style.position = prevPosition;
-      main.style.top = prevTop;
-      main.style.width = prevWidth;
-      main.style.overflow = prevOverflow;
-      main.scrollTop = scrollY;
+    const handler = (e: TouchEvent) => {
+      if (scrollRef.current && scrollRef.current.contains(e.target as Node)) return;
+      e.preventDefault();
     };
+    document.addEventListener('touchmove', handler, { passive: false });
+    return () => document.removeEventListener('touchmove', handler);
   }, []);
 
   return (
@@ -253,6 +232,7 @@ function AddToGoalModal({ goalId, goalName, goalColor, onClose }: {
 
         {/* Scrollable content */}
         <div
+          ref={scrollRef}
           className="flex-1 overflow-y-auto px-6 pb-8"
           style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain', touchAction: 'pan-y' }}
         >
