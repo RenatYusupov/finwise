@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuthStore } from '@/features/auth/store';
 import { useFinanceStore } from '@/features/finance/store';
@@ -157,17 +158,28 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
   const { openModal, closeModal } = useUIStore();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStep, setProcessingStep] = useState('');
   const [dragOver, setDragOver] = useState(false);
 
-  // Tell AppLayout to switch <main> to overflow-hidden so Telegram WebView
-  // has no scrollable background element when the sheet is open.
   useEffect(() => {
     openModal();
     return () => closeModal();
   }, [openModal, closeModal]);
+
+  // Block background scroll in Telegram WebView (passive:false required for preventDefault)
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const prevent = (e: TouchEvent) => {
+      if (scrollRef.current?.contains(e.target as Node)) return;
+      e.preventDefault();
+    };
+    overlay.addEventListener('touchmove', prevent, { passive: false });
+    return () => overlay.removeEventListener('touchmove', prevent);
+  }, []);
 
   const processFile = async (file: File) => {
     if (!file) return;
@@ -259,13 +271,14 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
     if (file) processFile(file);
   };
 
-  return (
+  return createPortal(
     <motion.div
+      ref={overlayRef}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       className="fixed inset-0 z-50 flex items-end"
-      style={{ background: 'rgba(26,26,46,0.65)', backdropFilter: 'blur(6px)' }}
+      style={{ background: 'rgba(26,26,46,0.65)', backdropFilter: 'blur(6px)', touchAction: 'none' }}
       onClick={(e) => { if (e.target === e.currentTarget && !isProcessing) onClose(); }}
     >
       <motion.div
@@ -285,8 +298,12 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
         {/* Scrollable content area */}
         <div
           ref={scrollRef}
-          className="flex-1 overflow-y-auto px-6 pb-8"
-          style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain', touchAction: 'pan-y' }}
+          className="flex-1 overflow-y-auto px-6 pb-4"
+          style={{
+            WebkitOverflowScrolling: 'touch',
+            overscrollBehavior: 'none',
+            touchAction: 'pan-y',
+          }}
         >
           {!result ? (
             <>
@@ -384,36 +401,46 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
                 </div>
               )}
               {result.errors.length > 0 && (
-                <div className="rounded-2xl p-3 mb-4 text-left" style={{ background: '#FFF8F0', border: '1px solid rgba(255,107,53,0.2)' }}>
+                <div className="rounded-2xl p-3 text-left" style={{ background: '#FFF8F0', border: '1px solid rgba(255,107,53,0.2)' }}>
                   <div className="text-xs font-bold text-orange-600 mb-1">⚠️ Предупреждения</div>
                   {result.errors.map((err, i) => (
                     <div key={i} className="text-xs text-orange-500">{err}</div>
                   ))}
                 </div>
               )}
-              <div className="flex gap-2">
-                <motion.button
-                  whileTap={{ scale: 0.97 }}
-                  onClick={() => { setResult(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
-                  className="flex-1 py-3 rounded-2xl font-semibold text-sm haptic"
-                  style={{ background: '#F0EEFF', color: '#6C63FF' }}
-                >
-                  Ещё файл
-                </motion.button>
-                <motion.button
-                  whileTap={{ scale: 0.97 }}
-                  onClick={onClose}
-                  className="flex-1 py-3 text-white rounded-2xl font-bold text-sm haptic"
-                  style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}
-                >
-                  Готово →
-                </motion.button>
-              </div>
             </div>
           )}
         </div>
+
+        {/* Fixed footer — always visible, never scrolls away */}
+        {result && (
+          <div
+            className="flex-shrink-0 px-6 pt-3 border-t border-gray-100"
+            style={{ paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' }}
+          >
+            <div className="flex gap-2">
+              <motion.button
+                whileTap={{ scale: 0.97 }}
+                onClick={() => { setResult(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
+                className="flex-1 py-3 rounded-2xl font-semibold text-sm haptic"
+                style={{ background: '#F0EEFF', color: '#6C63FF' }}
+              >
+                Ещё файл
+              </motion.button>
+              <motion.button
+                whileTap={{ scale: 0.97 }}
+                onClick={onClose}
+                className="flex-1 py-3 text-white rounded-2xl font-bold text-sm haptic"
+                style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}
+              >
+                Готово →
+              </motion.button>
+            </div>
+          </div>
+        )}
       </motion.div>
-    </motion.div>
+    </motion.div>,
+    document.body
   );
 }
 

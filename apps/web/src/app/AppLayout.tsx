@@ -1,4 +1,3 @@
-import type { CSSProperties } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { BottomNav } from '@/shared/ui/BottomNav';
@@ -23,16 +22,22 @@ export function AppLayout() {
   // from scrolling the background. The sheet's inner div has touch-action:pan-y to override.
   const mainClass = isFullHeight
     ? 'flex-1 min-h-0 flex flex-col overflow-hidden'
-    : 'flex-1 min-h-0 overflow-y-auto scroll-area pb-20';
-
-  const mainStyle: CSSProperties = isModalOpen
-    ? { background: 'var(--bg-warm)', touchAction: 'none', overscrollBehavior: 'none' }
-    : { background: 'var(--bg-warm)' };
+    : 'flex-1 min-h-0 overflow-y-auto scroll-area';
 
   return (
     <div className="flex flex-col h-full" style={{ background: 'var(--bg-warm)' }}>
       {/* Main content area */}
-      <main className={mainClass} style={mainStyle}>
+      <main
+        className={mainClass}
+        style={{
+          background: 'var(--bg-warm)',
+          // Reserve space for BottomNav (≈64px) + iOS safe-area-inset-bottom
+          paddingBottom: isFullHeight ? undefined : 'calc(80px + env(safe-area-inset-bottom, 0px))',
+          // When modal is open: block background scroll in Telegram WebView
+          // The sheet's inner div has touch-action:pan-y to override.
+          ...(isModalOpen ? { touchAction: 'none' as const, overscrollBehavior: 'none' as const } : {}),
+        }}
+      >
         <AnimatePresence mode="wait">
           <motion.div
             key={location.pathname}

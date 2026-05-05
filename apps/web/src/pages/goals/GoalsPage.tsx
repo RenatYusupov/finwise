@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useFinanceStore } from '@/features/finance/store';
 import { useUIStore } from '@/features/ui/store';
@@ -14,6 +15,7 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
   const { addGoal } = useFinanceStore();
   const { openModal, closeModal } = useUIStore();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
   const [name, setName] = useState('');
   const [targetAmount, setTargetAmount] = useState('');
   const [currentAmount, setCurrentAmount] = useState('');
@@ -34,20 +36,32 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
     onClose();
   };
 
-  // Tell AppLayout to switch <main> to overflow-hidden so Telegram WebView
-  // has no scrollable background element when the sheet is open.
   useEffect(() => {
     openModal();
     return () => closeModal();
   }, [openModal, closeModal]);
 
-  return (
+  // Block background scroll in Telegram WebView (passive:false required for preventDefault)
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const prevent = (e: TouchEvent) => {
+      // Allow scroll only inside the scrollable div
+      if (scrollRef.current?.contains(e.target as Node)) return;
+      e.preventDefault();
+    };
+    overlay.addEventListener('touchmove', prevent, { passive: false });
+    return () => overlay.removeEventListener('touchmove', prevent);
+  }, []);
+
+  return createPortal(
     <motion.div
+      ref={overlayRef}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       className="fixed inset-0 z-50 flex items-end"
-      style={{ background: 'rgba(26,26,46,0.6)', backdropFilter: 'blur(4px)' }}
+      style={{ background: 'rgba(26,26,46,0.6)', backdropFilter: 'blur(4px)', touchAction: 'none' }}
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <motion.div
@@ -67,118 +81,129 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
         {/* Scrollable content */}
         <div
           ref={scrollRef}
-          className="flex-1 overflow-y-auto px-6 pb-8"
-          style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain', touchAction: 'pan-y' }}
+          className="flex-1 overflow-y-auto px-6 pb-4"
+          style={{
+            WebkitOverflowScrolling: 'touch',
+            overscrollBehavior: 'none',
+            touchAction: 'pan-y',
+          }}
         >
-        <h2 className="text-xl font-bold text-gray-900 mb-5">✨ Новая цель</h2>
+          <h2 className="text-xl font-bold text-gray-900 mb-5">✨ Новая цель</h2>
 
-        {/* Icon picker */}
-        <div className="mb-4">
-          <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Иконка</div>
-          <div className="flex flex-wrap gap-2">
-            {GOAL_ICONS.map((ic) => (
-              <button
-                key={ic}
-                onClick={() => setIcon(ic)}
-                className={`w-11 h-11 rounded-2xl text-xl flex items-center justify-center haptic transition-all ${
-                  icon === ic ? 'ring-2 scale-110' : 'bg-gray-100'
-                }`}
-                style={icon === ic ? { background: color + '20', outline: `2px solid ${color}` } : {}}
-              >
-                {ic}
-              </button>
-            ))}
+          {/* Icon picker */}
+          <div className="mb-4">
+            <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Иконка</div>
+            <div className="flex flex-wrap gap-2">
+              {GOAL_ICONS.map((ic) => (
+                <button
+                  key={ic}
+                  onClick={() => setIcon(ic)}
+                  className={`w-11 h-11 rounded-2xl text-xl flex items-center justify-center haptic transition-all ${
+                    icon === ic ? 'ring-2 scale-110' : 'bg-gray-100'
+                  }`}
+                  style={icon === ic ? { background: color + '20', outline: `2px solid ${color}` } : {}}
+                >
+                  {ic}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
 
-        {/* Color */}
-        <div className="mb-4">
-          <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Цвет</div>
-          <div className="flex gap-2 flex-wrap">
-            {GOAL_COLORS.map((c) => (
-              <button
-                key={c}
-                onClick={() => setColor(c)}
-                className="w-9 h-9 rounded-full haptic transition-all"
-                style={{
-                  backgroundColor: c,
-                  boxShadow: color === c ? `0 0 0 3px white, 0 0 0 5px ${c}` : 'none',
-                  transform: color === c ? 'scale(1.15)' : 'scale(1)',
-                }}
+          {/* Color */}
+          <div className="mb-4">
+            <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Цвет</div>
+            <div className="flex gap-2 flex-wrap">
+              {GOAL_COLORS.map((c) => (
+                <button
+                  key={c}
+                  onClick={() => setColor(c)}
+                  className="w-9 h-9 rounded-full haptic transition-all"
+                  style={{
+                    backgroundColor: c,
+                    boxShadow: color === c ? `0 0 0 3px white, 0 0 0 5px ${c}` : 'none',
+                    transform: color === c ? 'scale(1.15)' : 'scale(1)',
+                  }}
+                />
+              ))}
+            </div>
+          </div>
+
+          {/* Name */}
+          <div className="mb-4">
+            <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Название</div>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Например: Новый iPhone"
+              className="w-full rounded-2xl px-4 py-3 text-gray-800 outline-none placeholder-gray-300 font-medium"
+              style={{ background: '#F8F7FF', border: '1.5px solid rgba(108,99,255,0.15)' }}
+            />
+          </div>
+
+          {/* Target amount */}
+          <div className="mb-4">
+            <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Целевая сумма</div>
+            <div className="relative">
+              <input
+                type="number"
+                value={targetAmount}
+                onChange={(e) => setTargetAmount(e.target.value)}
+                placeholder="0"
+                className="w-full rounded-2xl px-4 py-3 text-gray-800 outline-none placeholder-gray-300 font-medium pr-10"
+                style={{ background: '#F8F7FF', border: '1.5px solid rgba(108,99,255,0.15)' }}
               />
-            ))}
+              <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 font-bold">₽</span>
+            </div>
           </div>
-        </div>
 
-        {/* Name */}
-        <div className="mb-4">
-          <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Название</div>
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Например: Новый iPhone"
-            className="w-full rounded-2xl px-4 py-3 text-gray-800 outline-none placeholder-gray-300 font-medium"
-            style={{ background: '#F8F7FF', border: '1.5px solid rgba(108,99,255,0.15)' }}
-          />
-        </div>
+          {/* Current amount */}
+          <div className="mb-4">
+            <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Уже накоплено</div>
+            <div className="relative">
+              <input
+                type="number"
+                value={currentAmount}
+                onChange={(e) => setCurrentAmount(e.target.value)}
+                placeholder="0"
+                className="w-full rounded-2xl px-4 py-3 text-gray-800 outline-none placeholder-gray-300 font-medium pr-10"
+                style={{ background: '#F8F7FF', border: '1.5px solid rgba(108,99,255,0.15)' }}
+              />
+              <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 font-bold">₽</span>
+            </div>
+          </div>
 
-        {/* Target amount */}
-        <div className="mb-4">
-          <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Целевая сумма</div>
-          <div className="relative">
+          {/* Deadline */}
+          <div className="mb-2">
+            <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Срок (необязательно)</div>
             <input
-              type="number"
-              value={targetAmount}
-              onChange={(e) => setTargetAmount(e.target.value)}
-              placeholder="0"
-              className="w-full rounded-2xl px-4 py-3 text-gray-800 outline-none placeholder-gray-300 font-medium pr-10"
+              type="date"
+              value={deadline}
+              onChange={(e) => setDeadline(e.target.value)}
+              className="w-full rounded-2xl px-4 py-3 text-gray-800 outline-none font-medium"
               style={{ background: '#F8F7FF', border: '1.5px solid rgba(108,99,255,0.15)' }}
             />
-            <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 font-bold">₽</span>
           </div>
         </div>
 
-        {/* Current amount */}
-        <div className="mb-4">
-          <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Уже накоплено</div>
-          <div className="relative">
-            <input
-              type="number"
-              value={currentAmount}
-              onChange={(e) => setCurrentAmount(e.target.value)}
-              placeholder="0"
-              className="w-full rounded-2xl px-4 py-3 text-gray-800 outline-none placeholder-gray-300 font-medium pr-10"
-              style={{ background: '#F8F7FF', border: '1.5px solid rgba(108,99,255,0.15)' }}
-            />
-            <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 font-bold">₽</span>
-          </div>
-        </div>
-
-        {/* Deadline */}
-        <div className="mb-6">
-          <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Срок (необязательно)</div>
-          <input
-            type="date"
-            value={deadline}
-            onChange={(e) => setDeadline(e.target.value)}
-            className="w-full rounded-2xl px-4 py-3 text-gray-800 outline-none font-medium"
-            style={{ background: '#F8F7FF', border: '1.5px solid rgba(108,99,255,0.15)' }}
-          />
-        </div>
-
-        <motion.button
-          whileTap={{ scale: 0.97 }}
-          onClick={handleSubmit}
-          disabled={!name.trim() || !targetAmount}
-          className="w-full text-white font-bold text-lg py-4 rounded-2xl haptic disabled:opacity-40"
-          style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}
+        {/* Fixed footer — always visible, never scrolls away */}
+        <div
+          className="flex-shrink-0 px-6 pt-3 border-t border-gray-100"
+          style={{ paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' }}
         >
-          Создать цель ✨
-        </motion.button>
+          <motion.button
+            whileTap={{ scale: 0.97 }}
+            onClick={handleSubmit}
+            disabled={!name.trim() || !targetAmount}
+            className="w-full text-white font-bold text-lg py-4 rounded-2xl haptic disabled:opacity-40"
+            style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}
+          >
+            Создать цель ✨
+          </motion.button>
         </div>
       </motion.div>
-    </motion.div>
+    </motion.div>,
+    document.body
   );
 }
 
@@ -188,6 +213,7 @@ function AddToGoalModal({ goalId, goalName, goalColor, onClose }: {
   const { addToGoal } = useFinanceStore();
   const { openModal, closeModal } = useUIStore();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
   const [amount, setAmount] = useState('');
 
   const handleAdd = () => {
@@ -197,20 +223,31 @@ function AddToGoalModal({ goalId, goalName, goalColor, onClose }: {
     onClose();
   };
 
-  // Tell AppLayout to switch <main> to overflow-hidden so Telegram WebView
-  // has no scrollable background element when the sheet is open.
   useEffect(() => {
     openModal();
     return () => closeModal();
   }, [openModal, closeModal]);
 
-  return (
+  // Block background scroll in Telegram WebView (passive:false required for preventDefault)
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const prevent = (e: TouchEvent) => {
+      if (scrollRef.current?.contains(e.target as Node)) return;
+      e.preventDefault();
+    };
+    overlay.addEventListener('touchmove', prevent, { passive: false });
+    return () => overlay.removeEventListener('touchmove', prevent);
+  }, []);
+
+  return createPortal(
     <motion.div
+      ref={overlayRef}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       className="fixed inset-0 z-50 flex items-end"
-      style={{ background: 'rgba(26,26,46,0.6)', backdropFilter: 'blur(4px)' }}
+      style={{ background: 'rgba(26,26,46,0.6)', backdropFilter: 'blur(4px)', touchAction: 'none' }}
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <motion.div
@@ -230,53 +267,64 @@ function AddToGoalModal({ goalId, goalName, goalColor, onClose }: {
         {/* Scrollable content */}
         <div
           ref={scrollRef}
-          className="flex-1 overflow-y-auto px-6 pb-8"
-          style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain', touchAction: 'pan-y' }}
+          className="flex-1 overflow-y-auto px-6 pb-4"
+          style={{
+            WebkitOverflowScrolling: 'touch',
+            overscrollBehavior: 'none',
+            touchAction: 'pan-y',
+          }}
         >
-        <h2 className="text-xl font-bold text-gray-900 mb-1">Пополнить цель</h2>
-        <p className="text-gray-500 text-sm mb-5">{goalName}</p>
+          <h2 className="text-xl font-bold text-gray-900 mb-1">Пополнить цель</h2>
+          <p className="text-gray-500 text-sm mb-5">{goalName}</p>
 
-        <div className="relative mb-4">
-          <input
-            type="number"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            placeholder="0"
-            autoFocus
-            className="w-full rounded-2xl px-4 py-4 text-3xl font-bold text-gray-800 outline-none placeholder-gray-200 pr-12 text-center"
-            style={{ background: '#F8F7FF', border: `2px solid ${goalColor}30` }}
-          />
-          <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 font-bold text-xl">₽</span>
+          <div className="relative mb-4">
+            <input
+              type="number"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="0"
+              autoFocus
+              className="w-full rounded-2xl px-4 py-4 text-3xl font-bold text-gray-800 outline-none placeholder-gray-200 pr-12 text-center"
+              style={{ background: '#F8F7FF', border: `2px solid ${goalColor}30` }}
+            />
+            <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 font-bold text-xl">₽</span>
+          </div>
+
+          <div className="flex gap-2">
+            {[500, 1000, 5000, 10000].map((preset) => (
+              <button
+                key={preset}
+                onClick={() => setAmount(String(preset))}
+                className="flex-1 py-2.5 rounded-xl text-sm font-semibold haptic transition-all"
+                style={{
+                  background: amount === String(preset) ? goalColor : '#F3F4F6',
+                  color: amount === String(preset) ? 'white' : '#374151',
+                }}
+              >
+                {preset.toLocaleString('ru-RU')}
+              </button>
+            ))}
+          </div>
         </div>
 
-        <div className="flex gap-2 mb-5">
-          {[500, 1000, 5000, 10000].map((preset) => (
-            <button
-              key={preset}
-              onClick={() => setAmount(String(preset))}
-              className="flex-1 py-2.5 rounded-xl text-sm font-semibold haptic transition-all"
-              style={{
-                background: amount === String(preset) ? goalColor : '#F3F4F6',
-                color: amount === String(preset) ? 'white' : '#374151',
-              }}
-            >
-              {preset.toLocaleString('ru-RU')}
-            </button>
-          ))}
-        </div>
-
-        <motion.button
-          whileTap={{ scale: 0.97 }}
-          onClick={handleAdd}
-          disabled={!amount || parseFloat(amount) <= 0}
-          className="w-full text-white font-bold text-lg py-4 rounded-2xl haptic disabled:opacity-40"
-          style={{ background: `linear-gradient(135deg, ${goalColor}, ${goalColor}CC)` }}
+        {/* Fixed footer — always visible */}
+        <div
+          className="flex-shrink-0 px-6 pt-3 border-t border-gray-100"
+          style={{ paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' }}
         >
-          Пополнить 💰
-        </motion.button>
+          <motion.button
+            whileTap={{ scale: 0.97 }}
+            onClick={handleAdd}
+            disabled={!amount || parseFloat(amount) <= 0}
+            className="w-full text-white font-bold text-lg py-4 rounded-2xl haptic disabled:opacity-40"
+            style={{ background: `linear-gradient(135deg, ${goalColor}, ${goalColor}CC)` }}
+          >
+            Пополнить 💰
+          </motion.button>
         </div>
       </motion.div>
-    </motion.div>
+    </motion.div>,
+    document.body
   );
 }
 
