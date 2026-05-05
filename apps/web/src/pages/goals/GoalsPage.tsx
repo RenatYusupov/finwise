@@ -130,7 +130,7 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
 
           {/* Name */}
           <div className="mb-4">
-            <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Название</div>
+            <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Название цели ✏️</div>
             <input
               type="text"
               value={name}
