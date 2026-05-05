@@ -2,6 +2,12 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Lock the main scroll container when a bottom sheet is open */
+main.sheet-open {
+  overflow: hidden !important;
+  touch-action: none;
+}
+
 :root {
   --tg-theme-bg-color: #ffffff;
   --tg-theme-text-color: #1a1a2e;
