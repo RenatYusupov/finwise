@@ -59,12 +59,31 @@ function AppInner() {
       // After WebApp.ready(), CloudStorage is guaranteed available.
       // Sequential: rehydrate first (read cloud → merge → update store),
       // then upload the merged result back to cloud.
-      // Running them in parallel caused a race: forceSyncToCloud would
-      // overwrite cloud with stale local data before rehydrate finished.
       setTimeout(async () => {
         await rehydrateFromCloud().catch(() => {/* ignore */});
         await forceSyncToCloud().catch(() => {/* ignore */});
       }, 300);
+
+      // Re-sync whenever the Mini App becomes visible again
+      // (user switches back from another app/chat — cloud may have new data)
+      const handleVisibilityChange = async () => {
+        if (document.visibilityState === 'visible') {
+          await rehydrateFromCloud().catch(() => {/* ignore */});
+        }
+      };
+
+      // Telegram-specific: fires when Mini App is re-activated
+      const handleActivated = async () => {
+        await rehydrateFromCloud().catch(() => {/* ignore */});
+      };
+
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+      window.Telegram.WebApp.onEvent('activated', handleActivated);
+
+      return () => {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+        window.Telegram?.WebApp?.offEvent('activated', handleActivated);
+      };
     }
 
     // Redirect to onboarding if not completed
