@@ -12,7 +12,7 @@ import { BudgetPage } from '@/pages/budget/BudgetPage';
 import { AiChatPage } from '@/pages/ai-chat/AiChatPage';
 import { ProfilePage } from '@/pages/profile/ProfilePage';
 import { useAuthStore } from '@/features/auth/store';
-import { forceSyncToCloud } from '@/features/finance/store';
+import { forceSyncToCloud, rehydrateFromCloud } from '@/features/finance/store';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -56,11 +56,15 @@ function AppInner() {
       window.Telegram.WebApp.ready();
       window.Telegram.WebApp.expand();
 
-      // After WebApp is ready, sync localStorage → CloudStorage
-      // Small delay to ensure CloudStorage API is fully initialized
+      // After WebApp.ready(), CloudStorage is guaranteed available.
+      // 1. rehydrateFromCloud: read cloud data, merge with local, update live store
+      //    (fixes the case where store initialised before WebApp was ready)
+      // 2. forceSyncToCloud: upload local data to cloud
+      //    (ensures this device's data is always backed up)
       setTimeout(() => {
+        rehydrateFromCloud().catch(() => {/* ignore */});
         forceSyncToCloud().catch(() => {/* ignore */});
-      }, 500);
+      }, 300);
     }
 
     // Redirect to onboarding if not completed

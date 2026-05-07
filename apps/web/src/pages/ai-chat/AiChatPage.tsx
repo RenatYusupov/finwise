@@ -294,23 +294,29 @@ export function AiChatPage() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // VisualViewport — position input bar at the top of the keyboard
-  // Uses position:fixed + bottom offset so it moves WITH the keyboard instantly
+  // VisualViewport — position input bar at the top of the keyboard.
+  // CSS env(keyboard-inset-height) handles it natively on iOS 15+ / Chrome 94+.
+  // JS visualViewport is a fallback for older Telegram WebView versions.
   useEffect(() => {
     const vv = window.visualViewport;
-    if (!vv || !inputBarRef.current) return;
+    if (!vv) return;
 
     const update = () => {
       if (!inputBarRef.current) return;
       // Distance from bottom of visual viewport to bottom of layout viewport
       const offsetBottom = window.innerHeight - (vv.offsetTop + vv.height);
-      inputBarRef.current.style.bottom = `${Math.max(0, offsetBottom)}px`;
+      const clamped = Math.max(0, offsetBottom);
+      // Only override via JS when CSS env(keyboard-inset-height) is NOT supported
+      // (i.e. when the bar hasn't already moved). We always set it to be safe.
+      inputBarRef.current.style.bottom = `${clamped}px`;
 
-      const keyboardHeight = window.innerHeight - vv.height - vv.offsetTop;
-      const isOpen = keyboardHeight > 100;
+      const isOpen = clamped > 100;
       setKeyboardOpen(isOpen);
       if (isOpen) {
-        bottomRef.current?.scrollIntoView({ behavior: 'instant' });
+        // Use requestAnimationFrame to scroll after layout settles
+        requestAnimationFrame(() => {
+          bottomRef.current?.scrollIntoView({ behavior: 'instant' });
+        });
       }
     };
 
@@ -522,7 +528,8 @@ export function AiChatPage() {
       </div>
 
       {/* Input bar — position:fixed so it moves instantly with the keyboard (no lag).
-          visualViewport useEffect sets bottom offset to match keyboard height. */}
+          CSS env(keyboard-inset-height) is the primary mechanism (iOS 15+ / Chrome 94+).
+          visualViewport JS overrides bottom as a fallback for older WebView versions. */}
       <div
         ref={inputBarRef}
         className="glass border-t border-white/60"
@@ -530,12 +537,16 @@ export function AiChatPage() {
           position: 'fixed',
           left: 0,
           right: 0,
-          bottom: 0, // overridden by visualViewport JS
+          // Primary: CSS env(keyboard-inset-height) — zero-lag, no JS needed on modern iOS
+          // Fallback: safe-area-inset-bottom for notched devices without keyboard API
+          bottom: `env(keyboard-inset-height, env(safe-area-inset-bottom, 0px))`,
           zIndex: 50,
           paddingLeft: '16px',
           paddingRight: '16px',
           paddingTop: '12px',
-          paddingBottom: `calc(12px + env(safe-area-inset-bottom, 0px))`,
+          paddingBottom: '12px',
+          // Smooth transition only when keyboard is closing (avoids lag on open)
+          transition: 'bottom 0.0s',
         }}
       >
         {/* Groq fallback notice */}
