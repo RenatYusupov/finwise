@@ -12,6 +12,7 @@ import { BudgetPage } from '@/pages/budget/BudgetPage';
 import { AiChatPage } from '@/pages/ai-chat/AiChatPage';
 import { ProfilePage } from '@/pages/profile/ProfilePage';
 import { useAuthStore } from '@/features/auth/store';
+import { forceSyncToCloud } from '@/features/finance/store';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -54,6 +55,12 @@ function AppInner() {
     if (window.Telegram?.WebApp) {
       window.Telegram.WebApp.ready();
       window.Telegram.WebApp.expand();
+
+      // After WebApp is ready, sync localStorage → CloudStorage
+      // Small delay to ensure CloudStorage API is fully initialized
+      setTimeout(() => {
+        forceSyncToCloud().catch(() => {/* ignore */});
+      }, 500);
     }
 
     // Redirect to onboarding if not completed

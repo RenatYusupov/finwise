@@ -89,6 +89,52 @@ function tgCloud() {
   return window.Telegram?.WebApp?.CloudStorage ?? null;
 }
 
+/** Public: check CloudStorage status and transaction count — for debug UI */
+export async function debugCloudStorage(): Promise<{
+  available: boolean;
+  chunkCount: number | null;
+  totalChars: number | null;
+  txCount: number | null;
+  error: string | null;
+}> {
+  const cloud = tgCloud();
+  if (!cloud) return { available: false, chunkCount: null, totalChars: null, txCount: null, error: null };
+  try {
+    const raw = await cloudGet();
+    if (!raw) return { available: true, chunkCount: 0, totalChars: 0, txCount: 0, error: null };
+    const parsed = JSON.parse(raw);
+    const txCount = (parsed?.state as FinanceState)?.transactions?.length ?? 0;
+    const n = await new Promise<string | null>((res) =>
+      cloud.getItem(`${CLOUD_KEY}_n`, (_e: unknown, v: string) => res(v ?? null))
+    );
+    return {
+      available: true,
+      chunkCount: n ? parseInt(n, 10) : 0,
+      totalChars: raw.length,
+      txCount,
+      error: null,
+    };
+  } catch (e) {
+    return { available: true, chunkCount: null, totalChars: null, txCount: null, error: String(e) };
+  }
+}
+
+/** Public: force upload localStorage data to CloudStorage now */
+export async function forceSyncToCloud(name = 'finwise-finance'): Promise<string> {
+  const cloud = tgCloud();
+  if (!cloud) return '❌ CloudStorage недоступен (не Telegram WebApp)';
+  const raw = localStorage.getItem(name);
+  if (!raw) return '❌ localStorage пуст';
+  try {
+    await cloudSet(raw);
+    const parsed = JSON.parse(raw);
+    const txCount = (parsed?.state as FinanceState)?.transactions?.length ?? 0;
+    return `✅ Загружено ${txCount} транзакций в CloudStorage`;
+  } catch (e) {
+    return `❌ Ошибка: ${e}`;
+  }
+}
+
 function splitChunks(str: string): string[] {
   const chunks: string[] = [];
   for (let i = 0; i < str.length; i += CHUNK_SIZE) {
