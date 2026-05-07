@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuthStore } from '@/features/auth/store';
-import { useFinanceStore } from '@/features/finance/store';
+import { useFinanceStore, debugCloudStorage, rehydrateFromCloud, forceSyncToCloud } from '@/features/finance/store';
 import { useUIStore } from '@/features/ui/store';
 import { formatCurrency } from '@/shared/utils/format';
 import { parseBankXLSX, parseCSV, rowToTransactionGeneric } from './bankImport';
@@ -444,6 +444,64 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+// ─── Cloud Sync Debug Panel ───────────────────────────────────────────────────
+
+function CloudSyncPanel({ localTxCount }: { localTxCount: number }) {
+  const [status, setStatus] = useState<string>('Нажмите для проверки');
+  const [loading, setLoading] = useState(false);
+
+  const check = async () => {
+    setLoading(true);
+    setStatus('Проверяем...');
+    const info = await debugCloudStorage();
+    if (!info.available) {
+      setStatus('❌ CloudStorage недоступен на этом устройстве');
+    } else if (info.error) {
+      setStatus(`❌ Ошибка: ${info.error}`);
+    } else {
+      setStatus(
+        `✅ Cloud: ${info.txCount ?? 0} транзакций (${info.chunkCount ?? 0} чанков, ${info.totalChars ?? 0} символов)\n` +
+        `📱 Local: ${localTxCount} транзакций`
+      );
+    }
+    setLoading(false);
+  };
+
+  const syncNow = async () => {
+    setLoading(true);
+    setStatus('Синхронизируем...');
+    await rehydrateFromCloud().catch(() => {});
+    const result = await forceSyncToCloud().catch(() => '❌ Ошибка');
+    setStatus(`${result}\n📱 Local: ${localTxCount} транзакций`);
+    setLoading(false);
+  };
+
+  return (
+    <div className="bg-white rounded-2xl p-4" style={{ boxShadow: 'var(--shadow-card)', border: '1px solid rgba(108,99,255,0.15)' }}>
+      <div className="text-sm font-bold text-gray-800 mb-2">☁️ Синхронизация</div>
+      <div className="text-xs text-gray-500 whitespace-pre-line mb-3 min-h-[2.5rem]">{status}</div>
+      <div className="flex gap-2">
+        <button
+          onClick={check}
+          disabled={loading}
+          className="flex-1 py-2 rounded-xl text-xs font-semibold haptic disabled:opacity-50"
+          style={{ background: '#F0EEFF', color: '#6C63FF' }}
+        >
+          Проверить
+        </button>
+        <button
+          onClick={syncNow}
+          disabled={loading}
+          className="flex-1 py-2 rounded-xl text-xs font-semibold haptic disabled:opacity-50"
+          style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)', color: 'white' }}
+        >
+          Синхронизировать
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── Profile Page ─────────────────────────────────────────────────────────────
 
 export function ProfilePage() {
@@ -579,6 +637,9 @@ export function ProfilePage() {
           </button>
         ))}
       </div>
+
+      {/* Cloud sync debug panel */}
+      <CloudSyncPanel localTxCount={transactions.length} />
 
       {/* Logout */}
       <button

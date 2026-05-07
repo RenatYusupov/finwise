@@ -57,13 +57,13 @@ function AppInner() {
       window.Telegram.WebApp.expand();
 
       // After WebApp.ready(), CloudStorage is guaranteed available.
-      // 1. rehydrateFromCloud: read cloud data, merge with local, update live store
-      //    (fixes the case where store initialised before WebApp was ready)
-      // 2. forceSyncToCloud: upload local data to cloud
-      //    (ensures this device's data is always backed up)
-      setTimeout(() => {
-        rehydrateFromCloud().catch(() => {/* ignore */});
-        forceSyncToCloud().catch(() => {/* ignore */});
+      // Sequential: rehydrate first (read cloud → merge → update store),
+      // then upload the merged result back to cloud.
+      // Running them in parallel caused a race: forceSyncToCloud would
+      // overwrite cloud with stale local data before rehydrate finished.
+      setTimeout(async () => {
+        await rehydrateFromCloud().catch(() => {/* ignore */});
+        await forceSyncToCloud().catch(() => {/* ignore */});
       }, 300);
     }
 
