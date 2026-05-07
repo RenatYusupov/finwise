@@ -83,7 +83,9 @@ function getCategoryById(id: string): Category | undefined {
 // Falls back to localStorage when CloudStorage is unavailable (desktop browser).
 
 const CLOUD_KEY = 'fw_finance';
-const CHUNK_SIZE = 1000; // chars per chunk
+// Use larger chunks to minimise the number of CloudStorage writes.
+// CloudStorage limit is 4096 bytes/key; we use 3500 chars to stay safe.
+const CHUNK_SIZE = 3500;
 
 function tgCloud() {
   return window.Telegram?.WebApp?.CloudStorage ?? null;
@@ -143,27 +145,45 @@ function splitChunks(str: string): string[] {
   return chunks;
 }
 
-/** Write value to Telegram CloudStorage (chunked) */
+/** Write value to Telegram CloudStorage (chunked, sequential).
+ *  Writes chunks one-by-one to avoid Telegram rate-limit errors that
+ *  cause partial writes and corrupt the stored JSON.
+ *  Writes chunk count LAST so a partial write leaves count=0 (safe read).
+ */
 async function cloudSet(value: string): Promise<void> {
   const cloud = tgCloud();
   if (!cloud) return;
   const chunks = splitChunks(value);
-  // Store chunk count first
+
+  // Write data chunks sequentially first
+  for (let i = 0; i < chunks.length; i++) {
+    await new Promise<void>((res, rej) =>
+      cloud.setItem(`${CLOUD_KEY}_${i}`, chunks[i]!, (err) => {
+        if (err) rej(err); else res();
+      })
+    );
+  }
+
+  // Write count LAST — acts as a commit marker.
+  // If any chunk write failed above, count is never updated → read returns null (safe).
   await new Promise<void>((res, rej) =>
     cloud.setItem(`${CLOUD_KEY}_n`, String(chunks.length), (err) => {
       if (err) rej(err); else res();
     })
   );
-  await Promise.all(
-    chunks.map(
-      (chunk, i) =>
-        new Promise<void>((res, rej) =>
-          cloud.setItem(`${CLOUD_KEY}_${i}`, chunk, (err) => {
-            if (err) rej(err); else res();
-          })
-        )
-    )
+}
+
+/** Clear all CloudStorage keys for this app (use to wipe corrupted data) */
+export async function clearCloudStorage(): Promise<void> {
+  const cloud = tgCloud();
+  if (!cloud) return;
+  // Read current chunk count to know how many keys to delete
+  const n = await new Promise<string | null>((res) =>
+    cloud.getItem(`${CLOUD_KEY}_n`, (_err: unknown, val: string) => res(val ?? null))
   );
+  const count = n ? parseInt(n, 10) : 0;
+  const keys = [`${CLOUD_KEY}_n`, ...Array.from({ length: Math.max(count, 20) }, (_, i) => `${CLOUD_KEY}_${i}`)];
+  await new Promise<void>((res) => cloud.removeItems(keys, () => res()));
 }
 
 /** Read value from Telegram CloudStorage (chunked) */

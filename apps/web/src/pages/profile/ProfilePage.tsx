@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuthStore } from '@/features/auth/store';
-import { useFinanceStore, debugCloudStorage, rehydrateFromCloud, forceSyncToCloud } from '@/features/finance/store';
+import { useFinanceStore, debugCloudStorage, rehydrateFromCloud, forceSyncToCloud, clearCloudStorage } from '@/features/finance/store';
 import { useUIStore } from '@/features/ui/store';
 import { formatCurrency } from '@/shared/utils/format';
 import { parseBankXLSX, parseCSV, rowToTransactionGeneric } from './bankImport';
@@ -459,8 +459,8 @@ function CloudSyncPanel({ localTxCount }: { localTxCount: number }) {
       setStatus('❌ CloudStorage недоступен на этом устройстве\n(Telegram Desktop старой версии или браузер)');
       setCloudTxCount(null);
     } else if (info.error) {
-      setStatus(`❌ Ошибка: ${info.error}`);
-      setCloudTxCount(null);
+      setStatus(`❌ Ошибка чтения: ${info.error}\n⚠️ Данные в облаке повреждены — нажмите "Сбросить облако" затем "↑ В облако"`);
+      setCloudTxCount(0);
     } else {
       const ct = info.txCount ?? 0;
       setCloudTxCount(ct);
@@ -477,6 +477,17 @@ function CloudSyncPanel({ localTxCount }: { localTxCount: number }) {
     setStatus('Загружаем из облака...');
     await rehydrateFromCloud().catch(() => {});
     setStatus(`✅ Данные из облака загружены\n📱 Local: ${localTxCount} транзакций`);
+    setLoading(false);
+  };
+
+  // Clear corrupted cloud data, then re-upload local data cleanly
+  const resetAndPush = async () => {
+    setLoading(true);
+    setStatus('Очищаем облако...');
+    await clearCloudStorage().catch(() => {});
+    setStatus('Записываем данные в облако...');
+    const result = await forceSyncToCloud().catch(() => '❌ Ошибка записи');
+    setStatus(result);
     setLoading(false);
   };
 
@@ -499,7 +510,7 @@ function CloudSyncPanel({ localTxCount }: { localTxCount: number }) {
           onClick={check}
           disabled={loading}
           className="flex-1 py-2 rounded-xl text-xs font-semibold haptic disabled:opacity-50"
-          style={{ background: '#F0EEFF', color: '#6C63FF', minWidth: '80px' }}
+          style={{ background: '#F0EEFF', color: '#6C63FF', minWidth: '70px' }}
         >
           Проверить
         </button>
@@ -507,7 +518,7 @@ function CloudSyncPanel({ localTxCount }: { localTxCount: number }) {
           onClick={pullFromCloud}
           disabled={loading || cloudTxCount === 0}
           className="flex-1 py-2 rounded-xl text-xs font-semibold haptic disabled:opacity-50"
-          style={{ background: '#E8FFF5', color: '#00C896', minWidth: '80px' }}
+          style={{ background: '#E8FFF5', color: '#00C896', minWidth: '70px' }}
         >
           ↓ Из облака
         </button>
@@ -515,9 +526,17 @@ function CloudSyncPanel({ localTxCount }: { localTxCount: number }) {
           onClick={pushToCloud}
           disabled={loading}
           className="flex-1 py-2 rounded-xl text-xs font-semibold haptic disabled:opacity-50"
-          style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)', color: 'white', minWidth: '80px' }}
+          style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)', color: 'white', minWidth: '70px' }}
         >
           ↑ В облако
+        </button>
+        <button
+          onClick={resetAndPush}
+          disabled={loading}
+          className="flex-1 py-2 rounded-xl text-xs font-semibold haptic disabled:opacity-50"
+          style={{ background: '#FFF5F5', color: '#FF4757', minWidth: '70px' }}
+        >
+          Сбросить
         </button>
       </div>
     </div>
