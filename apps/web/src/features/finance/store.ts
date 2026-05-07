@@ -232,25 +232,42 @@ const hybridStorage = {
       if (localRaw) localParsed = JSON.parse(localRaw) as StorageValue<FinanceState>;
     } catch { /* ignore */ }
 
+    const localTxCount = (localParsed?.state as FinanceState)?.transactions?.length ?? 0;
+
     // Try CloudStorage (may return null if WebApp not ready yet — that's OK,
     // App.tsx calls rehydrateFromCloud() after WebApp.ready())
     let cloudParsed: StorageValue<FinanceState> | null = null;
     try {
       const cloudRaw = await cloudGet();
-      if (cloudRaw) cloudParsed = JSON.parse(cloudRaw) as StorageValue<FinanceState>;
+      if (cloudRaw) {
+        const parsed = JSON.parse(cloudRaw) as StorageValue<FinanceState>;
+        const cloudTxCount = (parsed?.state as FinanceState)?.transactions?.length ?? 0;
+        // Only use cloud data if it has transactions (never overwrite local with empty cloud)
+        if (cloudTxCount > 0) cloudParsed = parsed;
+      }
     } catch { /* ignore */ }
 
     if (cloudParsed && localParsed) {
       const merged = mergeStates(cloudParsed, localParsed);
-      const mergedStr = JSON.stringify(merged);
-      localStorage.setItem(name, mergedStr);
-      cloudSet(mergedStr).catch(() => {/* ignore */});
-      return merged;
+      const mergedTxCount = (merged.state as FinanceState)?.transactions?.length ?? 0;
+      // Safety: only write merged if it has at least as many transactions as local
+      if (mergedTxCount >= localTxCount) {
+        const mergedStr = JSON.stringify(merged);
+        localStorage.setItem(name, mergedStr);
+        cloudSet(mergedStr).catch(() => {/* ignore */});
+        return merged;
+      }
+      return localParsed;
     }
 
     if (cloudParsed) {
-      localStorage.setItem(name, JSON.stringify(cloudParsed));
-      return cloudParsed;
+      const cloudTxCount = (cloudParsed.state as FinanceState)?.transactions?.length ?? 0;
+      // Only replace local with cloud if cloud has more data
+      if (cloudTxCount >= localTxCount) {
+        localStorage.setItem(name, JSON.stringify(cloudParsed));
+        return cloudParsed;
+      }
+      return localParsed;
     }
 
     if (localParsed) {
@@ -434,24 +451,56 @@ export const useFinanceStore = create<FinanceState>()(
  * Call this after window.Telegram.WebApp.ready() — at that point
  * CloudStorage is guaranteed to be available, whereas during store
  * initialisation it may not have been.
+ *
+ * SAFETY RULES:
+ * 1. If cloud is empty → no-op (never wipe local data)
+ * 2. Merged result must have >= local transaction count (additive only)
+ * 3. Use setState() directly — never persist.rehydrate() which re-runs
+ *    hybridStorage.getItem and can trigger another cloud read/overwrite
  */
 export async function rehydrateFromCloud(storeName = 'finwise-finance'): Promise<void> {
   if (!tgCloud()) return;
   try {
     const cloudRaw = await cloudGet();
-    if (!cloudRaw) return;
-    const cloudParsed = JSON.parse(cloudRaw) as StorageValue<FinanceState>;
+    if (!cloudRaw) return; // Cloud empty → nothing to merge, keep local as-is
+
+    let cloudParsed: StorageValue<FinanceState>;
+    try {
+      cloudParsed = JSON.parse(cloudRaw) as StorageValue<FinanceState>;
+    } catch { return; } // Corrupt cloud data → abort
+
+    const cloudState = cloudParsed.state as FinanceState;
+    const cloudTxCount = cloudState?.transactions?.length ?? 0;
+    if (cloudTxCount === 0) return; // Cloud has no transactions → skip
+
+    // Read current local state
     const localRaw = localStorage.getItem(storeName);
-    let merged = cloudParsed;
+    let localParsed: StorageValue<FinanceState> | null = null;
     if (localRaw) {
-      try {
-        const localParsed = JSON.parse(localRaw) as StorageValue<FinanceState>;
-        merged = mergeStates(cloudParsed, localParsed);
-      } catch { /* ignore */ }
+      try { localParsed = JSON.parse(localRaw) as StorageValue<FinanceState>; } catch { /* ignore */ }
     }
-    const mergedStr = JSON.stringify(merged);
-    localStorage.setItem(storeName, mergedStr);
-    // Rehydrate the live store from the merged localStorage value
-    useFinanceStore.persist.rehydrate();
+    const localTxCount = (localParsed?.state as FinanceState)?.transactions?.length ?? 0;
+
+    // Merge: union of both sets
+    const merged = localParsed ? mergeStates(cloudParsed, localParsed) : cloudParsed;
+    const mergedTxCount = (merged.state as FinanceState)?.transactions?.length ?? 0;
+
+    // Safety: only proceed if merged has at least as many transactions as local
+    if (mergedTxCount < localTxCount) return;
+
+    // Write merged to localStorage
+    localStorage.setItem(storeName, JSON.stringify(merged));
+
+    // Apply merged state directly to live store (no persist.rehydrate() — that
+    // would re-run hybridStorage.getItem and risk another cloud read/overwrite)
+    const mergedState = merged.state as FinanceState;
+    useFinanceStore.setState({
+      transactions: mergedState.transactions ?? [],
+      goals: mergedState.goals ?? [],
+      budgets: mergedState.budgets ?? [],
+      aiMessages: mergedState.aiMessages ?? [],
+      streak: mergedState.streak ?? 1,
+      lastActiveDate: mergedState.lastActiveDate ?? '',
+    });
   } catch { /* ignore */ }
 }

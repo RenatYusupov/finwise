@@ -447,55 +447,77 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
 // ─── Cloud Sync Debug Panel ───────────────────────────────────────────────────
 
 function CloudSyncPanel({ localTxCount }: { localTxCount: number }) {
-  const [status, setStatus] = useState<string>('Нажмите для проверки');
+  const [status, setStatus] = useState<string>('Нажмите "Проверить" для диагностики');
   const [loading, setLoading] = useState(false);
+  const [cloudTxCount, setCloudTxCount] = useState<number | null>(null);
 
   const check = async () => {
     setLoading(true);
     setStatus('Проверяем...');
     const info = await debugCloudStorage();
     if (!info.available) {
-      setStatus('❌ CloudStorage недоступен на этом устройстве');
+      setStatus('❌ CloudStorage недоступен на этом устройстве\n(Telegram Desktop старой версии или браузер)');
+      setCloudTxCount(null);
     } else if (info.error) {
       setStatus(`❌ Ошибка: ${info.error}`);
+      setCloudTxCount(null);
     } else {
+      const ct = info.txCount ?? 0;
+      setCloudTxCount(ct);
       setStatus(
-        `✅ Cloud: ${info.txCount ?? 0} транзакций (${info.chunkCount ?? 0} чанков, ${info.totalChars ?? 0} символов)\n` +
-        `📱 Local: ${localTxCount} транзакций`
+        `☁️ Cloud: ${ct} транзакций\n📱 Local: ${localTxCount} транзакций`
       );
     }
     setLoading(false);
   };
 
-  const syncNow = async () => {
+  // Pull from cloud → merge into local (safe: only adds, never removes)
+  const pullFromCloud = async () => {
     setLoading(true);
-    setStatus('Синхронизируем...');
+    setStatus('Загружаем из облака...');
     await rehydrateFromCloud().catch(() => {});
+    setStatus(`✅ Данные из облака загружены\n📱 Local: ${localTxCount} транзакций`);
+    setLoading(false);
+  };
+
+  // Push local → cloud (upload this device's data)
+  const pushToCloud = async () => {
+    setLoading(true);
+    setStatus('Загружаем в облако...');
     const result = await forceSyncToCloud().catch(() => '❌ Ошибка');
-    setStatus(`${result}\n📱 Local: ${localTxCount} транзакций`);
+    setStatus(result);
     setLoading(false);
   };
 
   return (
     <div className="bg-white rounded-2xl p-4" style={{ boxShadow: 'var(--shadow-card)', border: '1px solid rgba(108,99,255,0.15)' }}>
-      <div className="text-sm font-bold text-gray-800 mb-2">☁️ Синхронизация</div>
-      <div className="text-xs text-gray-500 whitespace-pre-line mb-3 min-h-[2.5rem]">{status}</div>
-      <div className="flex gap-2">
+      <div className="text-sm font-bold text-gray-800 mb-1">☁️ Синхронизация</div>
+      <div className="text-xs text-gray-400 mb-2">Данные синхронизируются между устройствами через Telegram CloudStorage</div>
+      <div className="text-xs text-gray-600 whitespace-pre-line mb-3 min-h-[2.5rem] p-2 rounded-xl" style={{ background: '#F8F7FF' }}>{status}</div>
+      <div className="flex gap-2 flex-wrap">
         <button
           onClick={check}
           disabled={loading}
           className="flex-1 py-2 rounded-xl text-xs font-semibold haptic disabled:opacity-50"
-          style={{ background: '#F0EEFF', color: '#6C63FF' }}
+          style={{ background: '#F0EEFF', color: '#6C63FF', minWidth: '80px' }}
         >
           Проверить
         </button>
         <button
-          onClick={syncNow}
+          onClick={pullFromCloud}
+          disabled={loading || cloudTxCount === 0}
+          className="flex-1 py-2 rounded-xl text-xs font-semibold haptic disabled:opacity-50"
+          style={{ background: '#E8FFF5', color: '#00C896', minWidth: '80px' }}
+        >
+          ↓ Из облака
+        </button>
+        <button
+          onClick={pushToCloud}
           disabled={loading}
           className="flex-1 py-2 rounded-xl text-xs font-semibold haptic disabled:opacity-50"
-          style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)', color: 'white' }}
+          style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)', color: 'white', minWidth: '80px' }}
         >
-          Синхронизировать
+          ↑ В облако
         </button>
       </div>
     </div>
