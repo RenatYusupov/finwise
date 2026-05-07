@@ -338,6 +338,7 @@ interface FinanceState {
   addToGoal: (id: string, amount: number) => void;
   addAiMessage: (msg: Omit<AiMessage, 'id' | 'timestamp'>) => void;
   clearAiChat: () => void;
+  clearAllData: () => void;
   updateStreak: () => void;
 
   // Computed helpers
@@ -412,6 +413,12 @@ export const useFinanceStore = create<FinanceState>()(
       },
 
       clearAiChat: () => set({ aiMessages: [] }),
+
+      clearAllData: () => {
+        set({ transactions: [], goals: [], budgets: [], aiMessages: [], streak: 1, lastActiveDate: '' });
+        // Also wipe cloud storage so other devices don't re-sync old data
+        clearCloudStorage().catch(() => {/* ignore */});
+      },
 
       updateStreak: () => {
         const today = new Date().toISOString().split('T')[0] ?? '';
