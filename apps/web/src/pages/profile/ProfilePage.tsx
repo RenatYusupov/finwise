@@ -697,54 +697,56 @@ export function ProfilePage() {
         {showFileModal && <FileImportModal onClose={() => setShowFileModal(false)} />}
       </AnimatePresence>
 
-      {/* Confirm delete all dialog */}
-      <AnimatePresence>
-        {showClearConfirm && createPortal(
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center px-6"
-            style={{ background: 'rgba(26,26,46,0.7)', backdropFilter: 'blur(6px)' }}
-            onClick={() => setShowClearConfirm(false)}
-          >
+      {/* Confirm delete all dialog — portal with AnimatePresence INSIDE */}
+      {createPortal(
+        <AnimatePresence>
+          {showClearConfirm && (
             <motion.div
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              transition={{ type: 'spring', stiffness: 400, damping: 28 }}
-              className="bg-white rounded-3xl p-6 w-full max-w-sm"
-              onClick={(e) => e.stopPropagation()}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50 flex items-center justify-center px-6"
+              style={{ background: 'rgba(26,26,46,0.7)', backdropFilter: 'blur(6px)' }}
+              onClick={() => setShowClearConfirm(false)}
             >
-              <div className="text-4xl text-center mb-3">🗑️</div>
-              <h3 className="text-lg font-bold text-gray-900 text-center mb-2">Удалить все данные?</h3>
-              <p className="text-sm text-gray-500 text-center mb-6 leading-relaxed">
-                Все транзакции, цели и история чата будут удалены безвозвратно. Данные также будут удалены из облака.
-              </p>
-              <div className="flex gap-3">
-                <button
-                  onClick={() => setShowClearConfirm(false)}
-                  className="flex-1 py-3 rounded-2xl font-semibold text-sm haptic"
-                  style={{ background: '#F0EEFF', color: '#6C63FF' }}
-                >
-                  Отмена
-                </button>
-                <button
-                  onClick={() => {
-                    clearAllData();
-                    setShowClearConfirm(false);
-                  }}
-                  className="flex-1 py-3 rounded-2xl font-bold text-sm text-white haptic"
-                  style={{ background: 'linear-gradient(135deg, #FF4757, #FF6B81)' }}
-                >
-                  Удалить всё
-                </button>
-              </div>
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                transition={{ type: 'spring', stiffness: 400, damping: 28 }}
+                className="bg-white rounded-3xl p-6 w-full max-w-sm"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="text-4xl text-center mb-3">🗑️</div>
+                <h3 className="text-lg font-bold text-gray-900 text-center mb-2">Удалить все данные?</h3>
+                <p className="text-sm text-gray-500 text-center mb-6 leading-relaxed">
+                  Все транзакции, цели и история чата будут удалены безвозвратно. Данные также будут удалены из облака.
+                </p>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setShowClearConfirm(false)}
+                    className="flex-1 py-3 rounded-2xl font-semibold text-sm haptic"
+                    style={{ background: '#F0EEFF', color: '#6C63FF' }}
+                  >
+                    Отмена
+                  </button>
+                  <button
+                    onClick={() => {
+                      clearAllData();
+                      setShowClearConfirm(false);
+                    }}
+                    className="flex-1 py-3 rounded-2xl font-bold text-sm text-white haptic"
+                    style={{ background: 'linear-gradient(135deg, #FF4757, #FF6B81)' }}
+                  >
+                    Удалить всё
+                  </button>
+                </div>
+              </motion.div>
             </motion.div>
-          </motion.div>,
-          document.body
-        )}
-      </AnimatePresence>
+          )}
+        </AnimatePresence>,
+        document.body
+      )}
     </div>
   );
 }
