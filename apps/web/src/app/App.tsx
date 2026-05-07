@@ -64,24 +64,16 @@ function AppInner() {
         await forceSyncToCloud().catch(() => {/* ignore */});
       }, 300);
 
-      // Re-sync whenever the Mini App becomes visible again
-      // (user switches back from another app/chat — cloud may have new data)
-      const handleVisibilityChange = async () => {
-        if (document.visibilityState === 'visible') {
-          await rehydrateFromCloud().catch(() => {/* ignore */});
-        }
-      };
-
-      // Telegram-specific: fires when Mini App is re-activated
+      // Re-sync when Mini App is re-activated (user switches back from another chat).
+      // Using Telegram's native 'activated' event only — NOT visibilitychange,
+      // because visibilitychange fires during page reload and breaks the WebApp bridge.
       const handleActivated = async () => {
         await rehydrateFromCloud().catch(() => {/* ignore */});
       };
 
-      document.addEventListener('visibilitychange', handleVisibilityChange);
       window.Telegram.WebApp.onEvent('activated', handleActivated);
 
       return () => {
-        document.removeEventListener('visibilitychange', handleVisibilityChange);
         window.Telegram?.WebApp?.offEvent('activated', handleActivated);
       };
     }
