@@ -12,7 +12,7 @@ import { BudgetPage } from '@/pages/budget/BudgetPage';
 import { AiChatPage } from '@/pages/ai-chat/AiChatPage';
 import { ProfilePage } from '@/pages/profile/ProfilePage';
 import { useAuthStore } from '@/features/auth/store';
-import { forceSyncToCloud, rehydrateFromCloud } from '@/features/finance/store';
+import { rehydrateFromCloud } from '@/features/finance/store';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -57,12 +57,12 @@ function AppInner() {
       window.Telegram.WebApp.expand();
 
       // After WebApp.ready(), CloudStorage is guaranteed available.
-      // Sequential: rehydrate first (read cloud → merge → update store),
-      // then upload the merged result back to cloud.
-      setTimeout(async () => {
-        await rehydrateFromCloud().catch(() => {/* ignore */});
-        await forceSyncToCloud().catch(() => {/* ignore */});
-      }, 300);
+      // Rehydrate: read cloud → merge with local → update store.
+      // Do NOT forceSyncToCloud here — that would overwrite cloud with stale
+      // local data before the cloud read completes on other devices.
+      setTimeout(() => {
+        rehydrateFromCloud().catch(() => {/* ignore */});
+      }, 500);
 
       // Re-sync when Mini App is re-activated (user switches back from another chat).
       // Using Telegram's native 'activated' event only — NOT visibilitychange,

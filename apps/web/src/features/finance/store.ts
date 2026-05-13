@@ -458,7 +458,19 @@ export async function rehydrateFromCloud(storeName = 'finwise-finance'): Promise
   if (!tgCloud()) return;
   try {
     const cloudRaw = await cloudGet();
-    if (!cloudRaw) return; // Cloud empty → nothing to merge, keep local as-is
+
+    // Build local payload from live store state (always available)
+    const currentState = useFinanceStore.getState();
+    const localPayload = buildCloudPayload(currentState);
+
+    // If cloud is empty but we have local data → upload local to cloud so other
+    // devices can pick it up, then return (nothing to merge).
+    if (!cloudRaw) {
+      if (localPayload.transactions.length > 0) {
+        cloudSet(JSON.stringify(localPayload)).catch(() => {/* ignore */});
+      }
+      return;
+    }
 
     let cloudPayload: CloudPayload;
     try {
@@ -466,11 +478,7 @@ export async function rehydrateFromCloud(storeName = 'finwise-finance'): Promise
     } catch { return; } // Corrupt cloud data → abort
 
     // Guard: cloud payload must have the expected shape
-    if (!Array.isArray(cloudPayload.transactions) || cloudPayload.transactions.length === 0) return;
-
-    // Build local payload from live store state
-    const currentState = useFinanceStore.getState();
-    const localPayload = buildCloudPayload(currentState);
+    if (!Array.isArray(cloudPayload.transactions)) return;
 
     // Merge: union of both transaction/goal sets, keep higher streak
     const merged = mergePayloads(cloudPayload, localPayload);
@@ -500,6 +508,13 @@ export async function rehydrateFromCloud(storeName = 'finwise-finance'): Promise
         };
         localStorage.setItem(storeName, JSON.stringify(localStoreValue));
       } catch { /* ignore — live store already updated */ }
+    }
+
+    // If merged has MORE data than what was in cloud (local had extra transactions),
+    // write the merged result back to cloud so other devices get the full union.
+    if (merged.transactions.length > cloudPayload.transactions.length ||
+        merged.goals.length > cloudPayload.goals.length) {
+      cloudSet(JSON.stringify(merged)).catch(() => {/* ignore */});
     }
   } catch { /* ignore */ }
 }
