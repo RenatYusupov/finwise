@@ -1,4 +1,4 @@
-import type { FinanceState } from '../finance/store';
+import type { FinanceState, Goal } from '../finance/store';
 
 type StoreSnapshot = Pick<FinanceState, 'transactions' | 'goals'> & {
   summary: { income: number; expenses: number; savings: number; savingsRate: number };
@@ -65,11 +65,11 @@ export function generateAiResponse(userMessage: string, store: StoreSnapshot): s
     if (goals.length === 0) {
       return '🎯 У тебя пока нет финансовых целей. Перейди в раздел "Цели" и создай первую — это мотивирует откладывать деньги!';
     }
-    const activeGoals = goals.filter((g) => g.currentAmount < g.targetAmount);
+    const activeGoals = goals.filter((g: Goal) => g.currentAmount < g.targetAmount);
     if (activeGoals.length === 0) {
       return '🎉 Все твои цели достигнуты! Поставь новые — это поможет продолжать копить.';
     }
-    const nearest = activeGoals.sort((a, b) => {
+    const nearest = activeGoals.sort((a: Goal, b: Goal) => {
       const pa = a.targetAmount > 0 ? a.currentAmount / a.targetAmount : 0;
       const pb = b.targetAmount > 0 ? b.currentAmount / b.targetAmount : 0;
       return pb - pa;

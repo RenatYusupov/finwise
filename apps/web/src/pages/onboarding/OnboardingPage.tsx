@@ -23,7 +23,7 @@ export function OnboardingPage() {
   const [isLoading, setIsLoading] = useState(false);
 
   const updateData = (patch: Partial<OnboardingData>) => {
-    setData((prev) => ({ ...prev, ...patch }));
+    setData((prev: OnboardingData) => ({ ...prev, ...patch }));
   };
 
   const next = () => setStep((s) => Math.min(s + 1, TOTAL_STEPS));

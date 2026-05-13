@@ -78,63 +78,32 @@ function getCategoryById(id: string): Category | undefined {
 }
 
 // ─── Telegram CloudStorage sync ───────────────────────────────────────────────
-// Splits large data into 1KB chunks (CloudStorage limit per key is 4096 bytes,
-// but we chunk at 1000 chars to stay safe with JSON overhead).
-// Falls back to localStorage when CloudStorage is unavailable (desktop browser).
+//
+// DESIGN:
+// - Cloud payload is a SLIM object: { transactions, goals, streak, lastActiveDate }
+//   (no aiMessages, no budgets, no functions — keeps payload small)
+// - Chunks are 3500 chars each (CloudStorage limit 4096 bytes/key)
+// - Chunks written SEQUENTIALLY, count written LAST as commit marker
+// - Writes retry up to 3 times on failure
+// - hybridStorage.setItem only writes to localStorage (fast path)
+// - Cloud upload is triggered explicitly via scheduleCloudUpload() with debounce
+// - On app start, rehydrateFromCloud() merges cloud into local store
 
 const CLOUD_KEY = 'fw_finance';
-// Use larger chunks to minimise the number of CloudStorage writes.
-// CloudStorage limit is 4096 bytes/key; we use 3500 chars to stay safe.
 const CHUNK_SIZE = 3500;
+const CLOUD_VERSION = 1; // bump to invalidate old cloud data format
+
+/** Slim payload stored in CloudStorage — excludes aiMessages and functions */
+interface CloudPayload {
+  v: number;
+  transactions: Transaction[];
+  goals: Goal[];
+  streak: number;
+  lastActiveDate: string;
+}
 
 function tgCloud() {
   return window.Telegram?.WebApp?.CloudStorage ?? null;
-}
-
-/** Public: check CloudStorage status and transaction count — for debug UI */
-export async function debugCloudStorage(): Promise<{
-  available: boolean;
-  chunkCount: number | null;
-  totalChars: number | null;
-  txCount: number | null;
-  error: string | null;
-}> {
-  const cloud = tgCloud();
-  if (!cloud) return { available: false, chunkCount: null, totalChars: null, txCount: null, error: null };
-  try {
-    const raw = await cloudGet();
-    if (!raw) return { available: true, chunkCount: 0, totalChars: 0, txCount: 0, error: null };
-    const parsed = JSON.parse(raw);
-    const txCount = (parsed?.state as FinanceState)?.transactions?.length ?? 0;
-    const n = await new Promise<string | null>((res) =>
-      cloud.getItem(`${CLOUD_KEY}_n`, (_e: unknown, v: string) => res(v ?? null))
-    );
-    return {
-      available: true,
-      chunkCount: n ? parseInt(n, 10) : 0,
-      totalChars: raw.length,
-      txCount,
-      error: null,
-    };
-  } catch (e) {
-    return { available: true, chunkCount: null, totalChars: null, txCount: null, error: String(e) };
-  }
-}
-
-/** Public: force upload localStorage data to CloudStorage now */
-export async function forceSyncToCloud(name = 'finwise-finance'): Promise<string> {
-  const cloud = tgCloud();
-  if (!cloud) return '❌ CloudStorage недоступен (не Telegram WebApp)';
-  const raw = localStorage.getItem(name);
-  if (!raw) return '❌ localStorage пуст';
-  try {
-    await cloudSet(raw);
-    const parsed = JSON.parse(raw);
-    const txCount = (parsed?.state as FinanceState)?.transactions?.length ?? 0;
-    return `✅ Загружено ${txCount} транзакций в CloudStorage`;
-  } catch (e) {
-    return `❌ Ошибка: ${e}`;
-  }
 }
 
 function splitChunks(str: string): string[] {
@@ -145,48 +114,38 @@ function splitChunks(str: string): string[] {
   return chunks;
 }
 
-/** Write value to Telegram CloudStorage (chunked, sequential).
- *  Writes chunks one-by-one to avoid Telegram rate-limit errors that
- *  cause partial writes and corrupt the stored JSON.
- *  Writes chunk count LAST so a partial write leaves count=0 (safe read).
- */
-async function cloudSet(value: string): Promise<void> {
+/** Write string to CloudStorage (chunked, sequential, with retry) */
+async function cloudSet(value: string, retries = 3): Promise<void> {
   const cloud = tgCloud();
   if (!cloud) return;
   const chunks = splitChunks(value);
 
-  // Write data chunks sequentially first
-  for (let i = 0; i < chunks.length; i++) {
-    await new Promise<void>((res, rej) =>
-      cloud.setItem(`${CLOUD_KEY}_${i}`, chunks[i]!, (err) => {
-        if (err) rej(err); else res();
-      })
-    );
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      // Write data chunks sequentially
+      for (let i = 0; i < chunks.length; i++) {
+        await new Promise<void>((res, rej) =>
+          cloud.setItem(`${CLOUD_KEY}_${i}`, chunks[i]!, (err) => {
+            if (err) rej(new Error(String(err))); else res();
+          })
+        );
+      }
+      // Write count LAST — commit marker. Partial write → count stays old → safe read.
+      await new Promise<void>((res, rej) =>
+        cloud.setItem(`${CLOUD_KEY}_n`, String(chunks.length), (err) => {
+          if (err) rej(new Error(String(err))); else res();
+        })
+      );
+      return; // success
+    } catch {
+      if (attempt < retries - 1) {
+        await new Promise((r) => setTimeout(r, 500 * (attempt + 1))); // backoff
+      }
+    }
   }
-
-  // Write count LAST — acts as a commit marker.
-  // If any chunk write failed above, count is never updated → read returns null (safe).
-  await new Promise<void>((res, rej) =>
-    cloud.setItem(`${CLOUD_KEY}_n`, String(chunks.length), (err) => {
-      if (err) rej(err); else res();
-    })
-  );
 }
 
-/** Clear all CloudStorage keys for this app (use to wipe corrupted data) */
-export async function clearCloudStorage(): Promise<void> {
-  const cloud = tgCloud();
-  if (!cloud) return;
-  // Read current chunk count to know how many keys to delete
-  const n = await new Promise<string | null>((res) =>
-    cloud.getItem(`${CLOUD_KEY}_n`, (_err: unknown, val: string) => res(val ?? null))
-  );
-  const count = n ? parseInt(n, 10) : 0;
-  const keys = [`${CLOUD_KEY}_n`, ...Array.from({ length: Math.max(count, 20) }, (_, i) => `${CLOUD_KEY}_${i}`)];
-  await new Promise<void>((res) => cloud.removeItems(keys, () => res()));
-}
-
-/** Read value from Telegram CloudStorage (chunked) */
+/** Read string from CloudStorage (chunked) */
 async function cloudGet(): Promise<string | null> {
   const cloud = tgCloud();
   if (!cloud) return null;
@@ -206,123 +165,123 @@ async function cloudGet(): Promise<string | null> {
   return result || null;
 }
 
-/** Merge two persisted states: union of transactions/goals, keep higher streak */
-function mergeStates(
-  a: StorageValue<FinanceState>,
-  b: StorageValue<FinanceState>
-): StorageValue<FinanceState> {
-  const aState = a.state as FinanceState;
-  const bState = b.state as FinanceState;
-
-  // Union transactions by id
-  const txMap = new Map<string, Transaction>();
-  [...(aState.transactions ?? []), ...(bState.transactions ?? [])].forEach((t) =>
-    txMap.set(t.id, t)
+/** Clear all CloudStorage keys for this app (use to wipe corrupted data) */
+export async function clearCloudStorage(): Promise<void> {
+  const cloud = tgCloud();
+  if (!cloud) return;
+  const n = await new Promise<string | null>((res) =>
+    cloud.getItem(`${CLOUD_KEY}_n`, (_err: unknown, val: string) => res(val ?? null))
   );
+  const count = n ? parseInt(n, 10) : 0;
+  const keys = [`${CLOUD_KEY}_n`, ...Array.from({ length: Math.max(count, 20) }, (_, i) => `${CLOUD_KEY}_${i}`)];
+  await new Promise<void>((res) => cloud.removeItems(keys, () => res()));
+}
+
+/** Build slim cloud payload from current store state */
+function buildCloudPayload(state: FinanceState): CloudPayload {
+  return {
+    v: CLOUD_VERSION,
+    transactions: state.transactions ?? [],
+    goals: state.goals ?? [],
+    streak: state.streak ?? 1,
+    lastActiveDate: state.lastActiveDate ?? '',
+  };
+}
+
+/** Debounced cloud upload — waits 1s after last call before writing */
+let _uploadTimer: ReturnType<typeof setTimeout> | null = null;
+export function scheduleCloudUpload(): void {
+  if (_uploadTimer) clearTimeout(_uploadTimer);
+  _uploadTimer = setTimeout(async () => {
+    _uploadTimer = null;
+    if (!tgCloud()) return; // CloudStorage not available yet — will be called again after ready()
+    const state = useFinanceStore.getState();
+    const payload = buildCloudPayload(state);
+    await cloudSet(JSON.stringify(payload)).catch(() => {/* ignore */});
+  }, 1000);
+}
+
+/** Merge two cloud payloads: union of transactions/goals, keep higher streak */
+function mergePayloads(a: CloudPayload, b: CloudPayload): CloudPayload {
+  const txMap = new Map<string, Transaction>();
+  [...(a.transactions ?? []), ...(b.transactions ?? [])].forEach((t) => txMap.set(t.id, t));
   const transactions = Array.from(txMap.values()).sort(
     (x, y) => new Date(y.date).getTime() - new Date(x.date).getTime()
   );
 
-  // Union goals by id
   const goalMap = new Map<string, Goal>();
-  [...(aState.goals ?? []), ...(bState.goals ?? [])].forEach((g) =>
-    goalMap.set(g.id, g)
-  );
+  [...(a.goals ?? []), ...(b.goals ?? [])].forEach((g) => goalMap.set(g.id, g));
   const goals = Array.from(goalMap.values());
 
-  // Keep higher streak
-  const streak = Math.max(aState.streak ?? 1, bState.streak ?? 1);
-  const lastActiveDate =
-    (aState.lastActiveDate ?? '') > (bState.lastActiveDate ?? '')
-      ? aState.lastActiveDate
-      : bState.lastActiveDate;
+  const streak = Math.max(a.streak ?? 1, b.streak ?? 1);
+  const lastActiveDate = (a.lastActiveDate ?? '') > (b.lastActiveDate ?? '')
+    ? a.lastActiveDate : b.lastActiveDate;
 
-  return {
-    ...a,
-    state: { ...aState, transactions, goals, streak, lastActiveDate },
-  };
+  return { v: CLOUD_VERSION, transactions, goals, streak, lastActiveDate };
 }
 
-/** Custom Zustand persist storage: localStorage (fast) + CloudStorage (cross-device sync) */
+/** Custom Zustand persist storage: localStorage only (fast path).
+ *  Cloud sync is handled separately via scheduleCloudUpload() and rehydrateFromCloud().
+ */
 const hybridStorage = {
   getItem: async (name: string): Promise<StorageValue<FinanceState> | null> => {
-    const localRaw = localStorage.getItem(name);
-    let localParsed: StorageValue<FinanceState> | null = null;
+    const raw = localStorage.getItem(name);
+    if (!raw) return null;
     try {
-      if (localRaw) localParsed = JSON.parse(localRaw) as StorageValue<FinanceState>;
-    } catch { /* ignore */ }
-
-    const localTxCount = (localParsed?.state as FinanceState)?.transactions?.length ?? 0;
-
-    // Try CloudStorage (may return null if WebApp not ready yet — that's OK,
-    // App.tsx calls rehydrateFromCloud() after WebApp.ready())
-    let cloudParsed: StorageValue<FinanceState> | null = null;
-    try {
-      const cloudRaw = await cloudGet();
-      if (cloudRaw) {
-        const parsed = JSON.parse(cloudRaw) as StorageValue<FinanceState>;
-        const cloudTxCount = (parsed?.state as FinanceState)?.transactions?.length ?? 0;
-        // Only use cloud data if it has transactions (never overwrite local with empty cloud)
-        if (cloudTxCount > 0) cloudParsed = parsed;
-      }
-    } catch { /* ignore */ }
-
-    if (cloudParsed && localParsed) {
-      const merged = mergeStates(cloudParsed, localParsed);
-      const mergedTxCount = (merged.state as FinanceState)?.transactions?.length ?? 0;
-      // Safety: only write merged if it has at least as many transactions as local
-      if (mergedTxCount >= localTxCount) {
-        const mergedStr = JSON.stringify(merged);
-        localStorage.setItem(name, mergedStr);
-        cloudSet(mergedStr).catch(() => {/* ignore */});
-        return merged;
-      }
-      return localParsed;
-    }
-
-    if (cloudParsed) {
-      const cloudTxCount = (cloudParsed.state as FinanceState)?.transactions?.length ?? 0;
-      // Only replace local with cloud if cloud has more data
-      if (cloudTxCount >= localTxCount) {
-        localStorage.setItem(name, JSON.stringify(cloudParsed));
-        return cloudParsed;
-      }
-      return localParsed;
-    }
-
-    if (localParsed) {
-      // Upload local data to cloud in background (best-effort)
-      cloudSet(localRaw!).catch(() => {/* ignore */});
-      return localParsed;
-    }
-
-    return null;
+      return JSON.parse(raw) as StorageValue<FinanceState>;
+    } catch { return null; }
   },
 
   setItem: async (name: string, value: StorageValue<FinanceState>): Promise<void> => {
-    const str = JSON.stringify(value);
-    // Always write to localStorage immediately (synchronous UX)
-    localStorage.setItem(name, str);
-    // Write to CloudStorage asynchronously (cross-device sync)
-    cloudSet(str).catch(() => {/* ignore */});
+    // Write to localStorage immediately (synchronous UX, no cloud here)
+    localStorage.setItem(name, JSON.stringify(value));
   },
 
   removeItem: async (name: string): Promise<void> => {
     localStorage.removeItem(name);
-    const cloud = tgCloud();
-    if (cloud) {
-      cloud.getItem(`${CLOUD_KEY}_n`, (_err: unknown, val: string) => {
-        const count = parseInt(val ?? '0', 10);
-        const keys = [`${CLOUD_KEY}_n`, ...Array.from({ length: count }, (_, i) => `${CLOUD_KEY}_${i}`)];
-        cloud.removeItems(keys, () => {});
-      });
-    }
   },
 };
 
+/** Public: check CloudStorage status — for debug UI */
+export async function debugCloudStorage(): Promise<{
+  available: boolean;
+  chunkCount: number | null;
+  totalChars: number | null;
+  txCount: number | null;
+  error: string | null;
+}> {
+  const cloud = tgCloud();
+  if (!cloud) return { available: false, chunkCount: null, totalChars: null, txCount: null, error: null };
+  try {
+    const raw = await cloudGet();
+    if (!raw) return { available: true, chunkCount: 0, totalChars: 0, txCount: 0, error: null };
+    const parsed = JSON.parse(raw) as CloudPayload;
+    const txCount = parsed?.transactions?.length ?? 0;
+    const n = await new Promise<string | null>((res) =>
+      cloud.getItem(`${CLOUD_KEY}_n`, (_e: unknown, v: string) => res(v ?? null))
+    );
+    return { available: true, chunkCount: n ? parseInt(n, 10) : 0, totalChars: raw.length, txCount, error: null };
+  } catch (e) {
+    return { available: true, chunkCount: null, totalChars: null, txCount: null, error: String(e) };
+  }
+}
+
+/** Public: force upload current store state to CloudStorage */
+export async function forceSyncToCloud(): Promise<string> {
+  if (!tgCloud()) return '❌ CloudStorage недоступен (не Telegram WebApp)';
+  try {
+    const state = useFinanceStore.getState();
+    const payload = buildCloudPayload(state);
+    await cloudSet(JSON.stringify(payload));
+    return `✅ Загружено ${payload.transactions.length} транзакций в CloudStorage`;
+  } catch (e) {
+    return `❌ Ошибка: ${e}`;
+  }
+}
+
 // ─── State ────────────────────────────────────────────────────────────────────
 
-interface FinanceState {
+export interface FinanceState {
   transactions: Transaction[];
   goals: Goal[];
   budgets: Budget[];
@@ -372,10 +331,13 @@ export const useFinanceStore = create<FinanceState>()(
         };
         set((s) => ({ transactions: [newTx, ...s.transactions] }));
         get().updateStreak();
+        scheduleCloudUpload();
       },
 
-      deleteTransaction: (id) =>
-        set((s) => ({ transactions: s.transactions.filter((t) => t.id !== id) })),
+      deleteTransaction: (id) => {
+        set((s) => ({ transactions: s.transactions.filter((t) => t.id !== id) }));
+        scheduleCloudUpload();
+      },
 
       addGoal: (goal) => {
         const newGoal: Goal = {
@@ -384,24 +346,31 @@ export const useFinanceStore = create<FinanceState>()(
           createdAt: new Date().toISOString(),
         };
         set((s) => ({ goals: [newGoal, ...s.goals] }));
+        scheduleCloudUpload();
       },
 
-      updateGoal: (id, updates) =>
+      updateGoal: (id, updates) => {
         set((s) => ({
           goals: s.goals.map((g) => (g.id === id ? { ...g, ...updates } : g)),
-        })),
+        }));
+        scheduleCloudUpload();
+      },
 
-      deleteGoal: (id) =>
-        set((s) => ({ goals: s.goals.filter((g) => g.id !== id) })),
+      deleteGoal: (id) => {
+        set((s) => ({ goals: s.goals.filter((g) => g.id !== id) }));
+        scheduleCloudUpload();
+      },
 
-      addToGoal: (id, amount) =>
+      addToGoal: (id, amount) => {
         set((s) => ({
           goals: s.goals.map((g) =>
             g.id === id
               ? { ...g, currentAmount: Math.min(g.currentAmount + amount, g.targetAmount) }
               : g
           ),
-        })),
+        }));
+        scheduleCloudUpload();
+      },
 
       addAiMessage: (msg) => {
         const newMsg: AiMessage = {
@@ -491,43 +460,46 @@ export async function rehydrateFromCloud(storeName = 'finwise-finance'): Promise
     const cloudRaw = await cloudGet();
     if (!cloudRaw) return; // Cloud empty → nothing to merge, keep local as-is
 
-    let cloudParsed: StorageValue<FinanceState>;
+    let cloudPayload: CloudPayload;
     try {
-      cloudParsed = JSON.parse(cloudRaw) as StorageValue<FinanceState>;
+      cloudPayload = JSON.parse(cloudRaw) as CloudPayload;
     } catch { return; } // Corrupt cloud data → abort
 
-    const cloudState = cloudParsed.state as FinanceState;
-    const cloudTxCount = cloudState?.transactions?.length ?? 0;
-    if (cloudTxCount === 0) return; // Cloud has no transactions → skip
+    // Guard: cloud payload must have the expected shape
+    if (!Array.isArray(cloudPayload.transactions) || cloudPayload.transactions.length === 0) return;
 
-    // Read current local state
-    const localRaw = localStorage.getItem(storeName);
-    let localParsed: StorageValue<FinanceState> | null = null;
-    if (localRaw) {
-      try { localParsed = JSON.parse(localRaw) as StorageValue<FinanceState>; } catch { /* ignore */ }
-    }
-    const localTxCount = (localParsed?.state as FinanceState)?.transactions?.length ?? 0;
+    // Build local payload from live store state
+    const currentState = useFinanceStore.getState();
+    const localPayload = buildCloudPayload(currentState);
 
-    // Merge: union of both sets
-    const merged = localParsed ? mergeStates(cloudParsed, localParsed) : cloudParsed;
-    const mergedTxCount = (merged.state as FinanceState)?.transactions?.length ?? 0;
+    // Merge: union of both transaction/goal sets, keep higher streak
+    const merged = mergePayloads(cloudPayload, localPayload);
 
-    // Safety: only proceed if merged has at least as many transactions as local
-    if (mergedTxCount < localTxCount) return;
+    // Safety: merged result must not have fewer transactions than local
+    if (merged.transactions.length < currentState.transactions.length) return;
 
-    // Write merged to localStorage
-    localStorage.setItem(storeName, JSON.stringify(merged));
-
-    // Apply merged state directly to live store (no persist.rehydrate() — that
-    // would re-run hybridStorage.getItem and risk another cloud read/overwrite)
-    const mergedState = merged.state as FinanceState;
+    // Apply merged state directly to live store
     useFinanceStore.setState({
-      transactions: mergedState.transactions ?? [],
-      goals: mergedState.goals ?? [],
-      budgets: mergedState.budgets ?? [],
-      aiMessages: mergedState.aiMessages ?? [],
-      streak: mergedState.streak ?? 1,
-      lastActiveDate: mergedState.lastActiveDate ?? '',
+      transactions: merged.transactions,
+      goals: merged.goals,
+      streak: merged.streak,
+      lastActiveDate: merged.lastActiveDate,
     });
+
+    // Persist merged state back to localStorage so next cold-start is correct
+    const localRaw = localStorage.getItem(storeName);
+    if (localRaw) {
+      try {
+        const localStoreValue = JSON.parse(localRaw) as { state: Partial<FinanceState>; version?: number };
+        localStoreValue.state = {
+          ...localStoreValue.state,
+          transactions: merged.transactions,
+          goals: merged.goals,
+          streak: merged.streak,
+          lastActiveDate: merged.lastActiveDate,
+        };
+        localStorage.setItem(storeName, JSON.stringify(localStoreValue));
+      } catch { /* ignore — live store already updated */ }
+    }
   } catch { /* ignore */ }
 }
