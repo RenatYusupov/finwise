@@ -5,7 +5,7 @@ import { useAuthStore } from '@/features/auth/store';
 import { useFinanceStore, debugCloudStorage, rehydrateFromCloud, forceSyncToCloud, clearCloudStorage } from '@/features/finance/store';
 import { useUIStore } from '@/features/ui/store';
 import { formatCurrency } from '@/shared/utils/format';
-import { parseBankXLSX, parseCSV, rowToTransactionGeneric } from './bankImport';
+import { parseBankXLSX, parseTbankPDF, parseCSV, rowToTransactionGeneric } from './bankImport';
 import type { ParsedBankTx } from './bankImport';
 
 // ─── Groq Categorization ──────────────────────────────────────────────────────
@@ -60,19 +60,32 @@ other_inc — прочие доходы, переводы от физлиц, п�
 async function recategorizeWithGroq(transactions: ParsedBankTx[]): Promise<ParsedBankTx[]> {
   if (transactions.length === 0) return transactions;
 
-  // Categorize ALL transactions via Groq — no keyword pre-filter
+  // Only send transactions that were NOT already confidently categorized by MCC/keyword.
+  // This dramatically reduces Groq API calls for Alfa Bank imports where MCC covers ~90% of ops.
+  const needsGroq = transactions
+    .map((tx, idx) => ({ tx, idx }))
+    .filter(({ tx }) => !tx.categoryConfident);
+
+  if (needsGroq.length === 0) {
+    console.log('[bankImport] All transactions pre-categorized — skipping Groq');
+    return transactions;
+  }
+
+  console.log(`[bankImport] Sending ${needsGroq.length}/${transactions.length} transactions to Groq`);
+
   // Send in batches of 30 to stay within token limits
   const BATCH_SIZE = 30;
   const result: ParsedBankTx[] = [...transactions];
 
-  for (let i = 0; i < transactions.length; i += BATCH_SIZE) {
-    const batch = transactions.slice(i, i + BATCH_SIZE);
-    // Pass both description AND bankCategory so Groq has full context
-    const payload = batch.map((tx, batchIdx) => ({
-      idx: i + batchIdx,
-      description: tx.description,
-      bankCategory: tx.bankCategory,
-      type: tx.type,
+  for (let b = 0; b < needsGroq.length; b += BATCH_SIZE) {
+    const batchItems = needsGroq.slice(b, b + BATCH_SIZE);
+    // Use sequential batch indices (0, 1, 2…) in the Groq payload,
+    // but map them back to the original transaction indices after.
+    const payload = batchItems.map((item, batchIdx) => ({
+      idx: batchIdx,
+      description: item.tx.description,
+      bankCategory: item.tx.bankCategory,
+      type: item.tx.type,
     }));
 
     try {
@@ -102,28 +115,32 @@ async function recategorizeWithGroq(transactions: ParsedBankTx[]): Promise<Parse
       const content: string = (data.choices?.[0]?.message?.content ?? '').trim();
 
       let arr: { idx: number; categoryId: string }[] = [];
-      const match = content.match(/\[[\s\S]*\]/);
-      if (match) {
-        try { arr = JSON.parse(match[0]); } catch { /* skip */ }
-      } else if (content.startsWith('[')) {
-        try { arr = JSON.parse(content); } catch { /* skip */ }
+      // 3-strategy JSON extraction: direct parse → regex match → object unwrap
+      try { arr = JSON.parse(content); } catch {
+        const match = content.match(/\[[\s\S]*\]/);
+        if (match) {
+          try { arr = JSON.parse(match[0]); } catch { /* skip */ }
+        }
       }
 
       for (const item of arr) {
         if (
           typeof item.idx === 'number' &&
           item.idx >= 0 &&
-          item.idx < result.length &&
+          item.idx < batchItems.length &&
           VALID_CATEGORY_IDS.has(item.categoryId)
         ) {
-          const orig = result[item.idx]!;
-          result[item.idx] = {
+          // Map batch index back to original transaction index
+          const origIdx = batchItems[item.idx]!.idx;
+          const orig = result[origIdx]!;
+          result[origIdx] = {
             type: orig.type,
             amount: orig.amount,
             description: orig.description,
             bankCategory: orig.bankCategory,
             date: orig.date,
             categoryId: item.categoryId,
+            categoryConfident: true,
           };
         }
       }
@@ -151,7 +168,16 @@ const ACHIEVEMENTS = [
 
 // ─── File Import Modal ────────────────────────────────────────────────────────
 
-type ImportResult = { imported: number; skipped: number; errors: string[]; bankName?: string };
+type ImportResult = {
+  imported: number;
+  skipped: number;
+  errors: string[];
+  bankName?: string;
+  /** Transactions categorized by MCC/keyword — did NOT need Groq */
+  preCategCount?: number;
+  /** Transactions that were sent to Groq */
+  needsGroqCount?: number;
+};
 
 function FileImportModal({ onClose }: { onClose: () => void }) {
   const { addTransaction } = useFinanceStore();
@@ -184,8 +210,8 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
   const processFile = async (file: File) => {
     if (!file) return;
     const ext = file.name.split('.').pop()?.toLowerCase();
-    if (ext !== 'csv' && ext !== 'json' && ext !== 'xlsx' && ext !== 'xls') {
-      setResult({ imported: 0, skipped: 0, errors: ['Поддерживаются файлы .csv, .json и .xlsx'] });
+    if (ext !== 'csv' && ext !== 'json' && ext !== 'xlsx' && ext !== 'xls' && ext !== 'pdf') {
+      setResult({ imported: 0, skipped: 0, errors: ['Поддерживаются файлы .csv, .json, .xlsx и .pdf'] });
       return;
     }
     setIsProcessing(true);
@@ -193,19 +219,36 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
     const errors: string[] = [];
 
     try {
-      if (ext === 'xlsx' || ext === 'xls') {
+      if (ext === 'xlsx' || ext === 'xls' || ext === 'pdf') {
         const buffer = await file.arrayBuffer();
         setProcessingStep('Разбираем транзакции...');
-        const { transactions, bankName, skipped } = await parseBankXLSX(buffer);
+
+        let parseResult: { transactions: ParsedBankTx[]; bankName: string; skipped: number };
+        if (ext === 'pdf') {
+          setProcessingStep('Читаем PDF...');
+          parseResult = await parseTbankPDF(buffer);
+        } else {
+          parseResult = await parseBankXLSX(buffer);
+        }
+
+        const { transactions, bankName, skipped } = parseResult;
+
+        // Count how many are already confidently categorized (MCC / keyword / Alfa text)
+        const preCategCount = transactions.filter((t) => t.categoryConfident).length;
+        const needsGroqCount = transactions.length - preCategCount;
 
         let finalTransactions = transactions;
-        if (transactions.length > 0) {
-          setProcessingStep('🤖 AI категоризация через Groq...');
+        if (needsGroqCount > 0) {
+          setProcessingStep(`🤖 Groq AI: ${needsGroqCount} транзакций...`);
           try {
             finalTransactions = await recategorizeWithGroq(transactions);
           } catch {
             finalTransactions = transactions;
           }
+        } else if (transactions.length > 0) {
+          setProcessingStep('✅ Все категории определены по MCC/ключевым словам');
+          // Small delay so user sees the message
+          await new Promise((r) => setTimeout(r, 600));
         }
 
         let imported = 0;
@@ -213,7 +256,7 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
           addTransaction(tx);
           imported++;
         });
-        setResult({ imported, skipped, errors, bankName });
+        setResult({ imported, skipped, errors, bankName, preCategCount, needsGroqCount });
       } else {
         setProcessingStep('Разбираем файл...');
         const text = await new Promise<string>((resolve, reject) => {
@@ -248,7 +291,7 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
             if (errors.length < 3) errors.push(`Строка ${i + 2}: неверный формат`);
           }
         });
-        setResult({ imported, skipped, errors });
+        setResult({ imported, skipped, errors, preCategCount: 0, needsGroqCount: 0 });
       }
     } catch (err) {
       errors.push('Ошибка разбора файла: ' + (err instanceof Error ? err.message : 'неизвестная ошибка'));
@@ -308,7 +351,7 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
           {!result ? (
             <>
               <h2 className="text-xl font-bold text-gray-900 mb-1">📂 Импорт выписки из банка</h2>
-              <p className="text-sm text-gray-400 mb-5">Загрузите выписку из мобильного банка (.xlsx)</p>
+              <p className="text-sm text-gray-400 mb-5">Загрузите выписку из мобильного банка (.xlsx, .pdf)</p>
 
               <div
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
@@ -335,11 +378,11 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
                 <div className="font-semibold text-gray-700 mb-1">
                   {isProcessing ? (processingStep || 'Анализируем транзакции...') : 'Нажмите или перетащите файл'}
                 </div>
-                <div className="text-xs text-gray-400">Поддерживаются выписки Альфа-Банк, Сбер, Т-Банк, ВТБ (.xlsx)</div>
+                <div className="text-xs text-gray-400">Альфа-Банк, Сбер, Т-Банк, ВТБ (.xlsx) · Т-Банк PDF</div>
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept=".csv,.json,.xlsx,.xls"
+                  accept=".csv,.json,.xlsx,.xls,.pdf"
                   className="hidden"
                   onChange={handleFileChange}
                 />
@@ -356,9 +399,9 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
               </div>
 
               <div className="rounded-2xl p-4" style={{ background: '#E8FFF5' }}>
-                <div className="text-xs font-bold text-green-700 mb-2">🤖 AI-категоризация через Groq</div>
+                <div className="text-xs font-bold text-green-700 mb-2">🤖 Умная категоризация</div>
                 <div className="text-xs text-green-600 leading-relaxed">
-                  Транзакции автоматически распределяются по категориям с помощью Groq Llama 3.1. Внутренние переводы между счетами пропускаются.
+                  Альфа-Банк: категории определяются по MCC-коду (ISO 18245) — точно и без AI. Groq Llama 3.1 используется только для оставшихся транзакций.
                 </div>
               </div>
             </>
@@ -394,7 +437,15 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
                 <div className="rounded-2xl p-4 mb-4 text-left" style={{ background: '#F0FFF8', border: '1px solid rgba(0,200,150,0.2)' }}>
                   <div className="text-sm font-bold text-green-700 mb-1">✅ Что сделано</div>
                   <div className="text-xs text-green-600 leading-relaxed space-y-1">
-                    <div>• Транзакции распознаны и категоризированы через Groq AI</div>
+                    {(result.preCategCount ?? 0) > 0 && (
+                      <div>• {result.preCategCount} транзакций категоризированы по MCC/ключевым словам</div>
+                    )}
+                    {(result.needsGroqCount ?? 0) > 0 && (
+                      <div>• {result.needsGroqCount} транзакций уточнены через Groq AI</div>
+                    )}
+                    {(result.needsGroqCount ?? 0) === 0 && (result.preCategCount ?? 0) > 0 && (
+                      <div>• Groq AI не потребовался — все категории определены точно</div>
+                    )}
                     <div>• Внутренние переводы между счетами пропущены</div>
                     <div>• Описания очищены от технических данных</div>
                   </div>
