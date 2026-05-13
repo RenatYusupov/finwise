@@ -724,6 +724,14 @@ export async function parseBankXLSX(
       categoryConfident = categoryId !== null;
     }
 
+    // 4. SBP P2P transfer to phone number — always a personal transfer
+    // e.g. "Перевод XXXX через Систему быстрых платежей на +79165787566"
+    // e.g. "Категория: Прочие операции. Перевод ... +79165787566"
+    if (!categoryId && /\+7\d{10}\b/.test(descRaw)) {
+      categoryId = type === 'expense' ? 'other_exp' : 'other_inc';
+      categoryConfident = true;
+    }
+
     // Special case: salary/payroll detection from description
     if (!categoryId && type === 'income') {
       if (/аванс|зарплат|оклад|начислени/i.test(shortDesc)) {
