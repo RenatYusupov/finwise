@@ -1,40 +1,232 @@
+import { useMemo } from 'react';
 import { motion } from 'framer-motion';
 import { Link, useNavigate } from 'react-router-dom';
-import { useFinanceStore } from '@/features/finance/store';
+import { useFinanceStore, type Transaction } from '@/features/finance/store';
 import { useAuthStore } from '@/features/auth/store';
 import { formatCurrency } from '@/shared/utils/format';
 
-function SafeToSpendCard({ expenses, income }: { expenses: number; income: number }) {
-  const daysInMonth = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate();
-  const dayOfMonth = new Date().getDate();
-  const daysLeft = daysInMonth - dayOfMonth;
-  const dailyBudget = income > 0 ? income / daysInMonth : 0;
-  const spentToday = expenses / dayOfMonth;
-  const safeToSpend = Math.max(0, dailyBudget * daysLeft - (expenses - dailyBudget * (dayOfMonth - 1)));
-  const isOnTrack = spentToday <= dailyBudget;
+// ─── Spending Profile ─────────────────────────────────────────────────────────
+//
+// Analyses last 3 full months to classify expenses into:
+//   • fixed      — same category, similar amount (±25%) every month
+//                  (rent, mortgage, subscriptions, insurance)
+//   • semi_fixed — category appears every month but amount varies
+//                  (food, transport, utilities, cafe)
+//   • variable   — everything else (shopping, travel, entertainment…)
+//
+// Returns:
+//   avgIncome        — average monthly income over last 3 months
+//   fixedMonthly     — estimated fixed cost per month
+//   semiFixedMonthly — average semi-fixed cost per month
+//   discretionary    — avgIncome − fixedMonthly − semiFixedMonthly
+//   safeToday        — how much is safe to spend today
+//   safeRestOfMonth  — how much is safe to spend for the rest of the month
 
-  if (income === 0) return null;
+// Categories that are typically fixed (subscription-like)
+const FIXED_CATS = new Set(['home', 'education']);
+// Categories that are typically semi-fixed (recurring but variable)
+const SEMI_FIXED_CATS = new Set(['food', 'transport', 'cafe', 'health', 'sport', 'beauty']);
+
+interface SpendingProfile {
+  avgIncome: number;
+  fixedMonthly: number;
+  semiFixedMonthly: number;
+  discretionary: number;
+  thisMonthDiscretionarySpent: number;
+  safeToday: number;
+  safeRestOfMonth: number;
+  daysLeft: number;
+  isOnTrack: boolean;
+  hasEnoughHistory: boolean;
+}
+
+function computeSpendingProfile(transactions: Transaction[]): SpendingProfile {
+  const now = new Date();
+  const dayOfMonth = now.getDate();
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const daysLeft = Math.max(1, daysInMonth - dayOfMonth);
+
+  // Build per-month buckets for last 3 full months
+  const months: { start: string; end: string }[] = [];
+  for (let i = 1; i <= 3; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const start = d.toISOString();
+    const end = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59).toISOString();
+    months.push({ start, end });
+  }
+
+  // Current month boundaries
+  const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+
+  // Per-month income and expense-by-category
+  const monthlyIncome: number[] = [];
+  const monthlyCatSpend: Map<string, number[]>[] = months.map(() => new Map());
+
+  months.forEach(({ start, end }, mi) => {
+    const txs = transactions.filter((t) => t.date >= start && t.date <= end);
+    const income = txs.filter((t) => t.type === 'income').reduce((s, t) => s + t.amount, 0);
+    monthlyIncome.push(income);
+    txs.filter((t) => t.type === 'expense').forEach((t) => {
+      const arr = monthlyCatSpend[mi]!.get(t.categoryId) ?? [];
+      arr.push(t.amount);
+      monthlyCatSpend[mi]!.set(t.categoryId, arr);
+    });
+  });
+
+  const avgIncome = monthlyIncome.length > 0
+    ? monthlyIncome.reduce((s, v) => s + v, 0) / monthlyIncome.length
+    : 0;
+
+  // Collect all categories seen across all months
+  const allCats = new Set<string>();
+  monthlyCatSpend.forEach((m) => m.forEach((_, k) => allCats.add(k)));
+
+  let fixedMonthly = 0;
+  let semiFixedMonthly = 0;
+
+  allCats.forEach((cat) => {
+    // Monthly totals for this category (0 if absent)
+    const monthTotals = months.map((_, mi) => {
+      const amounts = monthlyCatSpend[mi]!.get(cat) ?? [];
+      return amounts.reduce((s, v) => s + v, 0);
+    });
+    const presentMonths = monthTotals.filter((v) => v > 0).length;
+    if (presentMonths < 2) return; // not recurring enough
+
+    const avg = monthTotals.reduce((s, v) => s + v, 0) / months.length;
+    const nonZero = monthTotals.filter((v) => v > 0);
+    const maxDev = nonZero.length > 1
+      ? Math.max(...nonZero.map((v) => Math.abs(v - avg) / avg))
+      : 0;
+
+    if (FIXED_CATS.has(cat) || (presentMonths === 3 && maxDev < 0.25)) {
+      // Appears every month with low variance → fixed
+      fixedMonthly += avg;
+    } else if (SEMI_FIXED_CATS.has(cat) && presentMonths >= 2) {
+      // Recurring but variable → semi-fixed
+      semiFixedMonthly += avg;
+    }
+  });
+
+  const discretionary = Math.max(0, avgIncome - fixedMonthly - semiFixedMonthly);
+
+  // This month's discretionary spending (variable categories only)
+  const thisMonthTxs = transactions.filter((t) => t.type === 'expense' && t.date >= thisMonthStart);
+  const thisMonthDiscretionarySpent = thisMonthTxs
+    .filter((t) => !FIXED_CATS.has(t.categoryId) && !SEMI_FIXED_CATS.has(t.categoryId))
+    .reduce((s, t) => s + t.amount, 0);
+
+  // Daily discretionary budget
+  const dailyDiscretionary = discretionary / daysInMonth;
+  // How much discretionary budget is left for the rest of the month
+  const discretionaryLeft = Math.max(0, discretionary - thisMonthDiscretionarySpent);
+  const safeRestOfMonth = discretionaryLeft;
+  const safeToday = Math.max(0, discretionaryLeft / daysLeft);
+
+  // On track = spent so far ≤ expected by this day
+  const expectedByToday = dailyDiscretionary * dayOfMonth;
+  const isOnTrack = thisMonthDiscretionarySpent <= expectedByToday * 1.1; // 10% tolerance
+
+  const hasEnoughHistory = avgIncome > 0 && months.some((_, mi) => monthlyCatSpend[mi]!.size > 0);
+
+  return {
+    avgIncome,
+    fixedMonthly,
+    semiFixedMonthly,
+    discretionary,
+    thisMonthDiscretionarySpent,
+    safeToday,
+    safeRestOfMonth,
+    daysLeft,
+    isOnTrack,
+    hasEnoughHistory,
+  };
+}
+
+// ─── Smart Safe-to-Spend Card ─────────────────────────────────────────────────
+
+function SafeToSpendCard({ transactions, income }: { transactions: Transaction[]; income: number }) {
+  const profile = useMemo(() => computeSpendingProfile(transactions), [transactions]);
+
+  // Fallback to simple formula if not enough history
+  if (!profile.hasEnoughHistory) {
+    if (income === 0) return null;
+    const now = new Date();
+    const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    const dayOfMonth = now.getDate();
+    const daysLeft = daysInMonth - dayOfMonth;
+    const dailyBudget = income / daysInMonth;
+    const summary_expenses = transactions
+      .filter((t) => t.type === 'expense' && t.date >= new Date(now.getFullYear(), now.getMonth(), 1).toISOString())
+      .reduce((s, t) => s + t.amount, 0);
+    const spentToday = summary_expenses / dayOfMonth;
+    const safeToday = Math.max(0, dailyBudget - spentToday);
+    const safeRestOfMonth = Math.max(0, dailyBudget * daysLeft - (summary_expenses - dailyBudget * (dayOfMonth - 1)));
+
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.1 }}
+        className="rounded-2xl p-4 insight-pulse"
+        style={{ background: 'linear-gradient(135deg, #6C63FF 0%, #9B59B6 100%)' }}
+      >
+        <div className="flex items-start justify-between">
+          <div>
+            <div className="text-purple-200 text-xs font-medium mb-1">💡 Можно потратить сегодня</div>
+            <div className="text-white text-3xl font-bold">{formatCurrency(safeToday)}</div>
+            <div className="text-purple-200 text-xs mt-1">
+              {spentToday <= dailyBudget ? '✅ Ты в рамках бюджета' : '⚠️ Немного превышаешь план'}
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="text-purple-200 text-xs mb-1">До конца месяца</div>
+            <div className="text-white font-bold text-lg">{formatCurrency(safeRestOfMonth)}</div>
+            <div className="text-purple-200 text-xs">{daysLeft} дн.</div>
+          </div>
+        </div>
+      </motion.div>
+    );
+  }
+
+  const statusText = profile.isOnTrack ? '✅ Ты в рамках бюджета' : '⚠️ Немного превышаешь план';
+  const statusColor = profile.isOnTrack ? '#86EFAC' : '#FCA5A5';
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: 0.1 }}
-      className="rounded-2xl p-4 insight-pulse"
+      className="rounded-2xl overflow-hidden insight-pulse"
       style={{ background: 'linear-gradient(135deg, #6C63FF 0%, #9B59B6 100%)' }}
     >
-      <div className="flex items-start justify-between">
+      {/* Main row */}
+      <div className="flex items-start justify-between p-4 pb-3">
         <div>
           <div className="text-purple-200 text-xs font-medium mb-1">💡 Можно потратить сегодня</div>
-          <div className="text-white text-3xl font-bold">{formatCurrency(Math.max(0, dailyBudget - spentToday))}</div>
-          <div className="text-purple-200 text-xs mt-1">
-            {isOnTrack ? '✅ Ты в рамках бюджета' : '⚠️ Немного превышаешь план'}
-          </div>
+          <div className="text-white text-3xl font-bold">{formatCurrency(profile.safeToday)}</div>
+          <div className="text-xs mt-1" style={{ color: statusColor }}>{statusText}</div>
         </div>
         <div className="text-right">
           <div className="text-purple-200 text-xs mb-1">До конца месяца</div>
-          <div className="text-white font-bold text-lg">{formatCurrency(safeToSpend)}</div>
-          <div className="text-purple-200 text-xs">{daysLeft} дн.</div>
+          <div className="text-white font-bold text-lg">{formatCurrency(profile.safeRestOfMonth)}</div>
+          <div className="text-purple-200 text-xs">{profile.daysLeft} дн.</div>
+        </div>
+      </div>
+
+      {/* Breakdown row */}
+      <div className="flex gap-px bg-white/10 border-t border-white/10">
+        <div className="flex-1 px-3 py-2 text-center">
+          <div className="text-purple-300 text-xs mb-0.5">Постоянные</div>
+          <div className="text-white text-xs font-semibold">{formatCurrency(profile.fixedMonthly)}</div>
+        </div>
+        <div className="flex-1 px-3 py-2 text-center border-l border-white/10">
+          <div className="text-purple-300 text-xs mb-0.5">Условно-пост.</div>
+          <div className="text-white text-xs font-semibold">{formatCurrency(profile.semiFixedMonthly)}</div>
+        </div>
+        <div className="flex-1 px-3 py-2 text-center border-l border-white/10">
+          <div className="text-purple-300 text-xs mb-0.5">Свободные</div>
+          <div className="text-white text-xs font-semibold">{formatCurrency(profile.discretionary)}</div>
         </div>
       </div>
     </motion.div>
@@ -81,7 +273,7 @@ function AiInsightBanner({ expenses, income, navigate }: { expenses: number; inc
 
 export function DashboardPage() {
   const { user } = useAuthStore();
-  const { getMonthSummary, getRecentTransactions, goals, streak } = useFinanceStore();
+  const { getMonthSummary, getRecentTransactions, goals, streak, transactions } = useFinanceStore();
   const navigate = useNavigate();
 
   const summary = getMonthSummary();
@@ -162,8 +354,8 @@ export function DashboardPage() {
         </div>
       </motion.div>
 
-      {/* Safe to spend */}
-      <SafeToSpendCard expenses={summary.expenses} income={summary.income} />
+      {/* Smart safe to spend */}
+      <SafeToSpendCard transactions={transactions} income={summary.income} />
 
       {/* AI Insight banner */}
       <AiInsightBanner expenses={summary.expenses} income={summary.income} navigate={navigate} />

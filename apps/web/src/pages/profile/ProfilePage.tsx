@@ -180,11 +180,68 @@ type ImportResult = {
 };
 
 // ─── Category Clarification Step ─────────────────────────────────────────────
-// Shown after import result for up to MAX_CLARIFY large uncategorized transactions.
-// "Large" = amount ≥ MIN_CLARIFY_AMOUNT and categoryId is other_exp or other_inc.
+// Shown after import result for transactions that need clarification.
+//
+// Selection logic:
+//   1. Only transactions with amount ≥ MIN_CLARIFY_AMOUNT (5000 ₽)
+//   2. Only other_exp / other_inc (truly uncategorized)
+//   3. Ask the minimum number needed to reach 90% category coverage
+//      within the current month's expense amount.
+//      Coverage = (total expense amount - other_exp amount) / total expense amount
+//   4. Hard cap at MAX_CLARIFY questions to avoid fatigue.
 
-const MAX_CLARIFY = 5;
-const MIN_CLARIFY_AMOUNT = 500;
+const MAX_CLARIFY = 10;
+const MIN_CLARIFY_AMOUNT = 5000;
+
+/**
+ * Given newly imported transactions, compute which ones to ask about.
+ * Goal: reach ≥ 90% category coverage of this month's expenses by amount.
+ * Only asks about other_exp/other_inc with amount ≥ MIN_CLARIFY_AMOUNT.
+ */
+function computeClarifyQueue(
+  newTxs: import('@/features/finance/store').Transaction[],
+  allTxs: import('@/features/finance/store').Transaction[],
+): string[] {
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+
+  // All expense transactions this month (including newly imported)
+  const monthExpenses = allTxs.filter((t) => t.type === 'expense' && t.date >= monthStart);
+  const totalExpenseAmount = monthExpenses.reduce((s, t) => s + t.amount, 0);
+  if (totalExpenseAmount === 0) return [];
+
+  // Amount currently in other_exp this month
+  const otherExpAmount = monthExpenses
+    .filter((t) => t.categoryId === 'other_exp')
+    .reduce((s, t) => s + t.amount, 0);
+
+  // Current coverage = (total - other_exp) / total
+  const currentCoverage = (totalExpenseAmount - otherExpAmount) / totalExpenseAmount;
+  if (currentCoverage >= 0.9) return []; // already ≥ 90% — nothing to ask
+
+  // How much other_exp amount we need to reclassify to reach 90%
+  // coverage = (total - remaining_other) / total >= 0.9
+  // → remaining_other <= total * 0.1
+  const targetOtherMax = totalExpenseAmount * 0.1;
+  const needToReclassify = otherExpAmount - targetOtherMax;
+  if (needToReclassify <= 0) return [];
+
+  // Candidates: newly imported other_exp/other_inc with amount ≥ threshold, sorted desc
+  const candidates = newTxs
+    .filter((t) => (t.categoryId === 'other_exp' || t.categoryId === 'other_inc') && t.amount >= MIN_CLARIFY_AMOUNT)
+    .sort((a, b) => b.amount - a.amount);
+
+  // Pick the minimum set of candidates (greedy by largest first) to cover the gap
+  const toAsk: string[] = [];
+  let reclassified = 0;
+  for (const tx of candidates) {
+    if (reclassified >= needToReclassify) break;
+    if (toAsk.length >= MAX_CLARIFY) break;
+    toAsk.push(tx.id);
+    reclassified += tx.amount;
+  }
+  return toAsk;
+}
 
 const CLARIFY_EXPENSE_CATS = [
   { id: 'food',          icon: '🍔', name: 'Еда' },
@@ -428,14 +485,11 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
           forceSyncToCloud().catch(() => {/* ignore — local data is safe */});
         }
 
-        // Collect IDs of newly imported transactions that are uncategorized (other_exp/other_inc)
-        // and large enough to be worth asking about. Cap at MAX_CLARIFY, sorted by amount desc.
-        const newTxs = useFinanceStore.getState().transactions.filter((t) => !idsBefore.has(t.id));
-        const toAsk = newTxs
-          .filter((t) => (t.categoryId === 'other_exp' || t.categoryId === 'other_inc') && t.amount >= MIN_CLARIFY_AMOUNT)
-          .sort((a, b) => b.amount - a.amount)
-          .slice(0, MAX_CLARIFY)
-          .map((t) => t.id);
+        // Compute which newly imported transactions need category clarification.
+        // Uses 90% monthly coverage logic — only asks the minimum needed.
+        const stateAfter = useFinanceStore.getState();
+        const newTxs = stateAfter.transactions.filter((t) => !idsBefore.has(t.id));
+        const toAsk = computeClarifyQueue(newTxs, stateAfter.transactions);
         setClarifyIds(toAsk);
 
         setResult({ imported, skipped, errors, bankName, preCategCount, needsGroqCount });
