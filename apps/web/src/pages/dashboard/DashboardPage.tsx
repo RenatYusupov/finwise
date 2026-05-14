@@ -7,35 +7,48 @@ import { formatCurrency } from '@/shared/utils/format';
 
 // ─── Spending Profile ─────────────────────────────────────────────────────────
 //
-// Analyses last 3 full months to classify expenses into:
-//   • fixed      — same category, similar amount (±25%) every month
-//                  (rent, mortgage, subscriptions, insurance)
-//   • semi_fixed — category appears every month but amount varies
-//                  (food, transport, utilities, cafe)
-//   • variable   — everything else (shopping, travel, entertainment…)
+// Algorithm (ground truth = this month's actual data):
 //
-// Returns:
-//   avgIncome        — average monthly income over last 3 months
-//   fixedMonthly     — estimated fixed cost per month
-//   semiFixedMonthly — average semi-fixed cost per month
-//   discretionary    — avgIncome − fixedMonthly − semiFixedMonthly
-//   safeToday        — how much is safe to spend today
-//   safeRestOfMonth  — how much is safe to spend for the rest of the month
+//   budget          = thisMonthIncome  (hard cap — can't spend what you haven't earned)
+//   fixedMonthly    = median of last 3 months fixed-category spending
+//                     (home, education + any category with ≤20% variance across 3 months)
+//   semiFixedMonthly= median of last 3 months semi-fixed spending
+//                     (food, transport, cafe, health, sport, beauty)
+//   alreadySpent    = all expenses this month so far
+//   remaining       = max(0, budget − alreadySpent)
+//   safeToday       = remaining / daysLeft
+//
+// Key design decisions:
+//   • Use THIS month's income as the budget cap (not historical avg which is
+//     inflated by one-time transfers/bonuses)
+//   • Use MEDIAN not average for historical fixed/semi-fixed (outlier-resistant)
+//   • If already overspent (alreadySpent > budget) → safeToday = 0, show warning
+//   • Show fixed + semi-fixed as informational breakdown only
 
 // Categories that are typically fixed (subscription-like)
 const FIXED_CATS = new Set(['home', 'education']);
 // Categories that are typically semi-fixed (recurring but variable)
 const SEMI_FIXED_CATS = new Set(['food', 'transport', 'cafe', 'health', 'sport', 'beauty']);
 
+function median(arr: number[]): number {
+  if (arr.length === 0) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2
+    : (sorted[mid] ?? 0);
+}
+
 interface SpendingProfile {
-  avgIncome: number;
+  thisMonthIncome: number;
   fixedMonthly: number;
   semiFixedMonthly: number;
-  discretionary: number;
-  thisMonthDiscretionarySpent: number;
+  alreadySpent: number;
+  remaining: number;
   safeToday: number;
   safeRestOfMonth: number;
   daysLeft: number;
+  isOverspent: boolean;
   isOnTrack: boolean;
   hasEnoughHistory: boolean;
 }
@@ -46,38 +59,39 @@ function computeSpendingProfile(transactions: Transaction[]): SpendingProfile {
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
   const daysLeft = Math.max(1, daysInMonth - dayOfMonth);
 
-  // Build per-month buckets for last 3 full months
-  const months: { start: string; end: string }[] = [];
+  // Current month boundaries
+  const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+
+  // This month's actual income (hard budget cap)
+  const thisMonthTxs = transactions.filter((t) => t.date >= thisMonthStart);
+  const thisMonthIncome = thisMonthTxs
+    .filter((t) => t.type === 'income')
+    .reduce((s, t) => s + t.amount, 0);
+  const alreadySpent = thisMonthTxs
+    .filter((t) => t.type === 'expense')
+    .reduce((s, t) => s + t.amount, 0);
+
+  // Build per-month buckets for last 3 full months (for fixed/semi-fixed detection)
+  const histMonths: { start: string; end: string }[] = [];
   for (let i = 1; i <= 3; i++) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const start = d.toISOString();
     const end = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59).toISOString();
-    months.push({ start, end });
+    histMonths.push({ start, end });
   }
 
-  // Current month boundaries
-  const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-
-  // Per-month income and expense-by-category
-  const monthlyIncome: number[] = [];
-  const monthlyCatSpend: Map<string, number[]>[] = months.map(() => new Map());
-
-  months.forEach(({ start, end }, mi) => {
-    const txs = transactions.filter((t) => t.date >= start && t.date <= end);
-    const income = txs.filter((t) => t.type === 'income').reduce((s, t) => s + t.amount, 0);
-    monthlyIncome.push(income);
-    txs.filter((t) => t.type === 'expense').forEach((t) => {
-      const arr = monthlyCatSpend[mi]!.get(t.categoryId) ?? [];
-      arr.push(t.amount);
-      monthlyCatSpend[mi]!.set(t.categoryId, arr);
-    });
+  // Per-month expense totals by category
+  const monthlyCatSpend: Map<string, number>[] = histMonths.map(({ start, end }) => {
+    const m = new Map<string, number>();
+    transactions
+      .filter((t) => t.type === 'expense' && t.date >= start && t.date <= end)
+      .forEach((t) => m.set(t.categoryId, (m.get(t.categoryId) ?? 0) + t.amount));
+    return m;
   });
 
-  const avgIncome = monthlyIncome.length > 0
-    ? monthlyIncome.reduce((s, v) => s + v, 0) / monthlyIncome.length
-    : 0;
+  const hasHistory = monthlyCatSpend.some((m) => m.size > 0);
 
-  // Collect all categories seen across all months
+  // Collect all categories seen in history
   const allCats = new Set<string>();
   monthlyCatSpend.forEach((m) => m.forEach((_, k) => allCats.add(k)));
 
@@ -85,61 +99,61 @@ function computeSpendingProfile(transactions: Transaction[]): SpendingProfile {
   let semiFixedMonthly = 0;
 
   allCats.forEach((cat) => {
-    // Monthly totals for this category (0 if absent)
-    const monthTotals = months.map((_, mi) => {
-      const amounts = monthlyCatSpend[mi]!.get(cat) ?? [];
-      return amounts.reduce((s, v) => s + v, 0);
-    });
+    const monthTotals = monthlyCatSpend.map((m) => m.get(cat) ?? 0);
     const presentMonths = monthTotals.filter((v) => v > 0).length;
     if (presentMonths < 2) return; // not recurring enough
 
-    const avg = monthTotals.reduce((s, v) => s + v, 0) / months.length;
+    const med = median(monthTotals.filter((v) => v > 0));
+    const avg = monthTotals.reduce((s, v) => s + v, 0) / histMonths.length;
     const nonZero = monthTotals.filter((v) => v > 0);
     const maxDev = nonZero.length > 1
       ? Math.max(...nonZero.map((v) => Math.abs(v - avg) / avg))
       : 0;
 
-    if (FIXED_CATS.has(cat) || (presentMonths === 3 && maxDev < 0.25)) {
+    if (FIXED_CATS.has(cat) || (presentMonths === 3 && maxDev < 0.20)) {
       // Appears every month with low variance → fixed
-      fixedMonthly += avg;
+      fixedMonthly += med;
     } else if (SEMI_FIXED_CATS.has(cat) && presentMonths >= 2) {
       // Recurring but variable → semi-fixed
-      semiFixedMonthly += avg;
+      semiFixedMonthly += med;
     }
   });
 
-  const discretionary = Math.max(0, avgIncome - fixedMonthly - semiFixedMonthly);
+  // Budget = this month's actual income (hard cap)
+  // If income is 0 (not yet received), fall back to median of last 3 months income
+  let budget = thisMonthIncome;
+  if (budget === 0 && hasHistory) {
+    const histIncome = histMonths.map(({ start, end }) =>
+      transactions
+        .filter((t) => t.type === 'income' && t.date >= start && t.date <= end)
+        .reduce((s, t) => s + t.amount, 0)
+    );
+    budget = median(histIncome.filter((v) => v > 0));
+  }
 
-  // This month's discretionary spending (variable categories only)
-  const thisMonthTxs = transactions.filter((t) => t.type === 'expense' && t.date >= thisMonthStart);
-  const thisMonthDiscretionarySpent = thisMonthTxs
-    .filter((t) => !FIXED_CATS.has(t.categoryId) && !SEMI_FIXED_CATS.has(t.categoryId))
-    .reduce((s, t) => s + t.amount, 0);
+  const remaining = Math.max(0, budget - alreadySpent);
+  const safeRestOfMonth = remaining;
+  const safeToday = remaining > 0 ? remaining / daysLeft : 0;
 
-  // Daily discretionary budget
-  const dailyDiscretionary = discretionary / daysInMonth;
-  // How much discretionary budget is left for the rest of the month
-  const discretionaryLeft = Math.max(0, discretionary - thisMonthDiscretionarySpent);
-  const safeRestOfMonth = discretionaryLeft;
-  const safeToday = Math.max(0, discretionaryLeft / daysLeft);
+  const isOverspent = alreadySpent > budget && budget > 0;
 
-  // On track = spent so far ≤ expected by this day
-  const expectedByToday = dailyDiscretionary * dayOfMonth;
-  const isOnTrack = thisMonthDiscretionarySpent <= expectedByToday * 1.1; // 10% tolerance
-
-  const hasEnoughHistory = avgIncome > 0 && months.some((_, mi) => monthlyCatSpend[mi]!.size > 0);
+  // On track = daily spend rate ≤ budget/day
+  const dailyBudget = budget / daysInMonth;
+  const dailySpendRate = dayOfMonth > 0 ? alreadySpent / dayOfMonth : 0;
+  const isOnTrack = dailySpendRate <= dailyBudget * 1.1;
 
   return {
-    avgIncome,
+    thisMonthIncome: budget,
     fixedMonthly,
     semiFixedMonthly,
-    discretionary,
-    thisMonthDiscretionarySpent,
+    alreadySpent,
+    remaining,
     safeToday,
     safeRestOfMonth,
     daysLeft,
+    isOverspent,
     isOnTrack,
-    hasEnoughHistory,
+    hasEnoughHistory: budget > 0,
   };
 }
 
@@ -189,8 +203,13 @@ function SafeToSpendCard({ transactions, income }: { transactions: Transaction[]
     );
   }
 
-  const statusText = profile.isOnTrack ? '✅ Ты в рамках бюджета' : '⚠️ Немного превышаешь план';
-  const statusColor = profile.isOnTrack ? '#86EFAC' : '#FCA5A5';
+  const statusText = profile.isOverspent
+    ? '🚨 Бюджет превышен в этом месяце'
+    : profile.isOnTrack ? '✅ Ты в рамках бюджета' : '⚠️ Немного превышаешь план';
+  const statusColor = profile.isOverspent ? '#FCA5A5' : profile.isOnTrack ? '#86EFAC' : '#FDE68A';
+  const cardBg = profile.isOverspent
+    ? 'linear-gradient(135deg, #7F1D1D 0%, #991B1B 100%)'
+    : 'linear-gradient(135deg, #6C63FF 0%, #9B59B6 100%)';
 
   return (
     <motion.div
@@ -198,7 +217,7 @@ function SafeToSpendCard({ transactions, income }: { transactions: Transaction[]
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: 0.1 }}
       className="rounded-2xl overflow-hidden insight-pulse"
-      style={{ background: 'linear-gradient(135deg, #6C63FF 0%, #9B59B6 100%)' }}
+      style={{ background: cardBg }}
     >
       {/* Main row */}
       <div className="flex items-start justify-between p-4 pb-3">
@@ -208,25 +227,31 @@ function SafeToSpendCard({ transactions, income }: { transactions: Transaction[]
           <div className="text-xs mt-1" style={{ color: statusColor }}>{statusText}</div>
         </div>
         <div className="text-right">
-          <div className="text-purple-200 text-xs mb-1">До конца месяца</div>
-          <div className="text-white font-bold text-lg">{formatCurrency(profile.safeRestOfMonth)}</div>
+          <div className="text-purple-200 text-xs mb-1">
+            {profile.isOverspent ? 'Перерасход' : 'До конца месяца'}
+          </div>
+          <div className="text-white font-bold text-lg">
+            {profile.isOverspent
+              ? formatCurrency(profile.alreadySpent - profile.thisMonthIncome)
+              : formatCurrency(profile.safeRestOfMonth)}
+          </div>
           <div className="text-purple-200 text-xs">{profile.daysLeft} дн.</div>
         </div>
       </div>
 
-      {/* Breakdown row */}
+      {/* Breakdown row: income / fixed / semi-fixed */}
       <div className="flex gap-px bg-white/10 border-t border-white/10">
         <div className="flex-1 px-3 py-2 text-center">
+          <div className="text-purple-300 text-xs mb-0.5">Доход</div>
+          <div className="text-white text-xs font-semibold">{formatCurrency(profile.thisMonthIncome)}</div>
+        </div>
+        <div className="flex-1 px-3 py-2 text-center border-l border-white/10">
           <div className="text-purple-300 text-xs mb-0.5">Постоянные</div>
           <div className="text-white text-xs font-semibold">{formatCurrency(profile.fixedMonthly)}</div>
         </div>
         <div className="flex-1 px-3 py-2 text-center border-l border-white/10">
           <div className="text-purple-300 text-xs mb-0.5">Условно-пост.</div>
           <div className="text-white text-xs font-semibold">{formatCurrency(profile.semiFixedMonthly)}</div>
-        </div>
-        <div className="flex-1 px-3 py-2 text-center border-l border-white/10">
-          <div className="text-purple-300 text-xs mb-0.5">Свободные</div>
-          <div className="text-white text-xs font-semibold">{formatCurrency(profile.discretionary)}</div>
         </div>
       </div>
     </motion.div>
