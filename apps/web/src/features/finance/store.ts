@@ -177,11 +177,15 @@ export async function clearCloudStorage(): Promise<void> {
   await new Promise<void>((res) => cloud.removeItems(keys, () => res()));
 }
 
-/** Build slim cloud payload from current store state */
+/** Build slim cloud payload from current store state.
+ *  Strips the embedded `category` object from each transaction — it's derived
+ *  from `categoryId` and can be reconstructed on read, saving ~30% payload size.
+ */
 function buildCloudPayload(state: FinanceState): CloudPayload {
   return {
     v: CLOUD_VERSION,
-    transactions: state.transactions ?? [],
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    transactions: (state.transactions ?? []).map(({ category: _cat, ...tx }) => tx),
     goals: state.goals ?? [],
     streak: state.streak ?? 1,
     lastActiveDate: state.lastActiveDate ?? '',
@@ -486,22 +490,36 @@ export async function rehydrateFromCloud(storeName = 'finwise-finance'): Promise
     // Safety: merged result must not have fewer transactions than local
     if (merged.transactions.length < currentState.transactions.length) return;
 
+    // Re-attach category objects stripped from cloud payload to save space.
+    // They are derived from categoryId and always available in ALL_CATEGORIES.
+    const transactionsWithCats = merged.transactions.map((tx) => ({
+      ...tx,
+      category: getCategoryById(tx.categoryId) ?? {
+        id: tx.categoryId,
+        name: tx.categoryId,
+        icon: '📦',
+        color: '#6B7280',
+        type: 'expense' as const,
+      },
+    }));
+
     // Apply merged state directly to live store
     useFinanceStore.setState({
-      transactions: merged.transactions,
+      transactions: transactionsWithCats,
       goals: merged.goals,
       streak: merged.streak,
       lastActiveDate: merged.lastActiveDate,
     });
 
-    // Persist merged state back to localStorage so next cold-start is correct
+    // Persist merged state back to localStorage so next cold-start is correct.
+    // Use transactionsWithCats so localStorage has full category objects (fast cold-start).
     const localRaw = localStorage.getItem(storeName);
     if (localRaw) {
       try {
         const localStoreValue = JSON.parse(localRaw) as { state: Partial<FinanceState>; version?: number };
         localStoreValue.state = {
           ...localStoreValue.state,
-          transactions: merged.transactions,
+          transactions: transactionsWithCats,
           goals: merged.goals,
           streak: merged.streak,
           lastActiveDate: merged.lastActiveDate,

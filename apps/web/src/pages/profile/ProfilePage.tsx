@@ -256,6 +256,16 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
           addTransaction(tx);
           imported++;
         });
+
+        // Force immediate cloud sync after bulk import.
+        // Don't rely on the 1s debounce — with 1400 transactions the debounce
+        // fires but the payload may be too large for a single write window.
+        // forceSyncToCloud() awaits the full chunked write before returning.
+        if (imported > 0) {
+          setProcessingStep('☁️ Синхронизация с облаком...');
+          await forceSyncToCloud().catch(() => {/* ignore — local data is safe */});
+        }
+
         setResult({ imported, skipped, errors, bankName, preCategCount, needsGroqCount });
       } else {
         setProcessingStep('Разбираем файл...');
