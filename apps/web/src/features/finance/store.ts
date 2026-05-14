@@ -145,7 +145,10 @@ async function cloudSet(value: string, retries = 3): Promise<void> {
   }
 }
 
-/** Read string from CloudStorage (chunked) */
+/** Read string from CloudStorage (chunked).
+ *  Returns null if the commit marker is missing, the count is invalid,
+ *  or ANY chunk comes back empty (partial write / read failure).
+ */
 async function cloudGet(): Promise<string | null> {
   const cloud = tgCloud();
   if (!cloud) return null;
@@ -154,14 +157,18 @@ async function cloudGet(): Promise<string | null> {
   );
   if (!n) return null;
   const count = parseInt(n, 10);
-  if (!count || isNaN(count)) return null;
+  if (!count || isNaN(count) || count < 1) return null;
   const keys = Array.from({ length: count }, (_, i) => `${CLOUD_KEY}_${i}`);
-  const chunks = await new Promise<string[]>((res) =>
+  const chunks = await new Promise<(string | null)[]>((res) =>
     cloud.getItems(keys, (_err: unknown, vals: Record<string, string>) =>
-      res(keys.map((k) => vals[k] ?? ''))
+      res(keys.map((k) => (vals[k] != null && vals[k] !== '' ? vals[k] : null)))
     )
   );
-  const result = chunks.join('');
+  // Integrity check: every chunk must be present. A missing chunk means a
+  // partial write occurred — treat the whole read as invalid to avoid
+  // silently joining corrupt JSON.
+  if (chunks.some((c) => c === null)) return null;
+  const result = (chunks as string[]).join('');
   return result || null;
 }
 
@@ -526,20 +533,26 @@ export async function rehydrateFromCloud(storeName = 'finwise-finance'): Promise
 
     // Persist merged state back to localStorage so next cold-start is correct.
     // Use transactionsWithCats so localStorage has full category objects (fast cold-start).
-    const localRaw = localStorage.getItem(storeName);
-    if (localRaw) {
-      try {
-        const localStoreValue = JSON.parse(localRaw) as { state: Partial<FinanceState>; version?: number };
-        localStoreValue.state = {
-          ...localStoreValue.state,
-          transactions: transactionsWithCats,
-          goals: merged.goals,
-          streak: merged.streak,
-          lastActiveDate: merged.lastActiveDate,
-        };
-        localStorage.setItem(storeName, JSON.stringify(localStoreValue));
-      } catch { /* ignore — live store already updated */ }
-    }
+    // IMPORTANT: also handle fresh devices where localRaw is null — create the entry
+    // from scratch so the data survives the next cold start without another cloud read.
+    try {
+      const localRaw = localStorage.getItem(storeName);
+      let localStoreValue: { state: Partial<FinanceState>; version?: number };
+      if (localRaw) {
+        localStoreValue = JSON.parse(localRaw) as { state: Partial<FinanceState>; version?: number };
+      } else {
+        // Fresh device — bootstrap the persist entry so Zustand can read it on next start
+        localStoreValue = { state: {}, version: 0 };
+      }
+      localStoreValue.state = {
+        ...localStoreValue.state,
+        transactions: transactionsWithCats,
+        goals: merged.goals,
+        streak: merged.streak,
+        lastActiveDate: merged.lastActiveDate,
+      };
+      localStorage.setItem(storeName, JSON.stringify(localStoreValue));
+    } catch { /* ignore — live store already updated */ }
 
     // If merged has MORE data than what was in cloud (local had extra transactions),
     // write the merged result back to cloud so other devices get the full union.

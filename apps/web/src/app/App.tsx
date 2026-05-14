@@ -60,9 +60,21 @@ function AppInner() {
       // Rehydrate: read cloud → merge with local → update store.
       // Do NOT forceSyncToCloud here — that would overwrite cloud with stale
       // local data before the cloud read completes on other devices.
-      setTimeout(() => {
+      //
+      // Use 1500ms delay on first attempt — Telegram Desktop WebApp bridge
+      // can take longer than mobile to expose CloudStorage after ready().
+      // If CloudStorage is still not available (tgCloud() returns null inside
+      // rehydrateFromCloud), the function returns early and we retry at 3000ms.
+      let retryTimer: ReturnType<typeof setTimeout> | null = null;
+      const timer = setTimeout(() => {
         rehydrateFromCloud().catch(() => {/* ignore */});
-      }, 500);
+        // Retry once more at 3s in case CloudStorage wasn't ready at 1.5s
+        // (common on Telegram Desktop first open). rehydrateFromCloud() is
+        // idempotent and guarded by _rehydrating so double-calls are safe.
+        retryTimer = setTimeout(() => {
+          rehydrateFromCloud().catch(() => {/* ignore */});
+        }, 1500);
+      }, 1500);
 
       // Re-sync when Mini App is re-activated (user switches back from another chat).
       // Using Telegram's native 'activated' event only — NOT visibilitychange,
@@ -74,6 +86,8 @@ function AppInner() {
       window.Telegram.WebApp.onEvent('activated', handleActivated);
 
       return () => {
+        clearTimeout(timer);
+        if (retryTimer) clearTimeout(retryTimer);
         window.Telegram?.WebApp?.offEvent('activated', handleActivated);
       };
     }
