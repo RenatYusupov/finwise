@@ -205,6 +205,14 @@ export function scheduleCloudUpload(): void {
   }, 1000);
 }
 
+/** Cancel any pending debounced upload (call before forceSyncToCloud to avoid double-write) */
+export function cancelScheduledUpload(): void {
+  if (_uploadTimer) {
+    clearTimeout(_uploadTimer);
+    _uploadTimer = null;
+  }
+}
+
 /** Merge two cloud payloads: union of transactions/goals, keep higher streak */
 function mergePayloads(a: CloudPayload, b: CloudPayload): CloudPayload {
   const txMap = new Map<string, Transaction>();
@@ -458,8 +466,13 @@ export const useFinanceStore = create<FinanceState>()(
  * 3. Use setState() directly — never persist.rehydrate() which re-runs
  *    hybridStorage.getItem and can trigger another cloud read/overwrite
  */
+/** In-flight guard: prevents concurrent rehydrateFromCloud() calls */
+let _rehydrating = false;
+
 export async function rehydrateFromCloud(storeName = 'finwise-finance'): Promise<void> {
   if (!tgCloud()) return;
+  if (_rehydrating) return; // already in progress — skip duplicate call
+  _rehydrating = true;
   try {
     const cloudRaw = await cloudGet();
 
@@ -534,5 +547,7 @@ export async function rehydrateFromCloud(storeName = 'finwise-finance'): Promise
         merged.goals.length > cloudPayload.goals.length) {
       cloudSet(JSON.stringify(merged)).catch(() => {/* ignore */});
     }
-  } catch { /* ignore */ }
+  } catch { /* ignore */ } finally {
+    _rehydrating = false; // always release the guard
+  }
 }

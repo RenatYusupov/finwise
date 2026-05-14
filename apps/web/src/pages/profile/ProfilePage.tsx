@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuthStore } from '@/features/auth/store';
-import { useFinanceStore, debugCloudStorage, rehydrateFromCloud, forceSyncToCloud, clearCloudStorage } from '@/features/finance/store';
+import { useFinanceStore, debugCloudStorage, rehydrateFromCloud, forceSyncToCloud, clearCloudStorage, cancelScheduledUpload } from '@/features/finance/store';
 import { useUIStore } from '@/features/ui/store';
 import { formatCurrency } from '@/shared/utils/format';
 import { parseBankXLSX, parseTbankPDF, parseCSV, rowToTransactionGeneric } from './bankImport';
@@ -263,6 +263,7 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
         // forceSyncToCloud() awaits the full chunked write before returning.
         if (imported > 0) {
           setProcessingStep('☁️ Синхронизация с облаком...');
+          cancelScheduledUpload(); // cancel pending debounce to avoid double-write
           await forceSyncToCloud().catch(() => {/* ignore — local data is safe */});
         }
 
