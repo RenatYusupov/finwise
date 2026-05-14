@@ -257,14 +257,13 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
           imported++;
         });
 
-        // Force immediate cloud sync after bulk import.
-        // Don't rely on the 1s debounce — with 1400 transactions the debounce
-        // fires but the payload may be too large for a single write window.
-        // forceSyncToCloud() awaits the full chunked write before returning.
+        // Fire cloud sync in the background — do NOT await it.
+        // Data is already safely in localStorage at this point.
+        // Awaiting forceSyncToCloud() with 1500 transactions blocks the UI for
+        // 10–30s while each chunk round-trips to Telegram CloudStorage.
         if (imported > 0) {
-          setProcessingStep('☁️ Синхронизация с облаком...');
           cancelScheduledUpload(); // cancel pending debounce to avoid double-write
-          await forceSyncToCloud().catch(() => {/* ignore — local data is safe */});
+          forceSyncToCloud().catch(() => {/* ignore — local data is safe */});
         }
 
         setResult({ imported, skipped, errors, bankName, preCategCount, needsGroqCount });
