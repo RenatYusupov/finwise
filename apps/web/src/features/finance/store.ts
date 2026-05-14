@@ -309,6 +309,7 @@ export interface FinanceState {
   lastActiveDate: string;
 
   addTransaction: (tx: Omit<Transaction, 'id' | 'category'>) => void;
+  updateTransaction: (id: string, updates: Partial<Omit<Transaction, 'id'>>) => void;
   deleteTransaction: (id: string) => void;
   addGoal: (goal: Omit<Goal, 'id' | 'createdAt'>) => void;
   updateGoal: (id: string, updates: Partial<Goal>) => void;
@@ -350,6 +351,24 @@ export const useFinanceStore = create<FinanceState>()(
         };
         set((s) => ({ transactions: [newTx, ...s.transactions] }));
         get().updateStreak();
+        scheduleCloudUpload();
+      },
+
+      updateTransaction: (id, updates) => {
+        set((s) => ({
+          transactions: s.transactions.map((t) => {
+            if (t.id !== id) return t;
+            const categoryId = updates.categoryId ?? t.categoryId;
+            const category = getCategoryById(categoryId) ?? {
+              id: categoryId,
+              name: categoryId,
+              icon: '📦',
+              color: '#6B7280',
+              type: 'expense' as const,
+            };
+            return { ...t, ...updates, category };
+          }),
+        }));
         scheduleCloudUpload();
       },
 

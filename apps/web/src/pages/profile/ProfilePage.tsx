@@ -179,8 +179,163 @@ type ImportResult = {
   needsGroqCount?: number;
 };
 
+// ─── Category Clarification Step ─────────────────────────────────────────────
+// Shown after import result for up to MAX_CLARIFY large uncategorized transactions.
+// "Large" = amount ≥ MIN_CLARIFY_AMOUNT and categoryId is other_exp or other_inc.
+
+const MAX_CLARIFY = 5;
+const MIN_CLARIFY_AMOUNT = 500;
+
+const CLARIFY_EXPENSE_CATS = [
+  { id: 'food',          icon: '🍔', name: 'Еда' },
+  { id: 'cafe',          icon: '☕', name: 'Кафе' },
+  { id: 'transport',     icon: '🚗', name: 'Транспорт' },
+  { id: 'shopping',      icon: '🛍️', name: 'Покупки' },
+  { id: 'health',        icon: '💊', name: 'Здоровье' },
+  { id: 'entertainment', icon: '🎮', name: 'Развлечения' },
+  { id: 'sport',         icon: '🏋️', name: 'Спорт' },
+  { id: 'beauty',        icon: '💄', name: 'Красота' },
+  { id: 'home',          icon: '🏠', name: 'Дом' },
+  { id: 'education',     icon: '📚', name: 'Учёба' },
+  { id: 'travel',        icon: '✈️', name: 'Путешествия' },
+  { id: 'other_exp',     icon: '💸', name: 'Другое' },
+];
+
+const CLARIFY_INCOME_CATS = [
+  { id: 'salary',     icon: '💼', name: 'Зарплата' },
+  { id: 'freelance',  icon: '💻', name: 'Фриланс' },
+  { id: 'gift',       icon: '🎁', name: 'Подарок' },
+  { id: 'investment', icon: '📈', name: 'Инвестиции' },
+  { id: 'cashback',   icon: '💳', name: 'Кэшбэк' },
+  { id: 'other_inc',  icon: '💰', name: 'Другое' },
+];
+
+function ClarifyCategoryStep({
+  txIds,
+  onDone,
+}: {
+  txIds: string[];
+  onDone: () => void;
+}) {
+  const { transactions, updateTransaction } = useFinanceStore();
+  const [index, setIndex] = useState(0);
+
+  const queue = txIds
+    .map((id) => transactions.find((t) => t.id === id))
+    .filter(Boolean) as import('@/features/finance/store').Transaction[];
+
+  if (queue.length === 0 || index >= queue.length) {
+    // All done — call onDone on next tick to avoid render-during-render
+    setTimeout(onDone, 0);
+    return null;
+  }
+
+  const tx = queue[index]!;
+  const cats = tx.type === 'income' ? CLARIFY_INCOME_CATS : CLARIFY_EXPENSE_CATS;
+  const progress = index + 1;
+  const total = queue.length;
+
+  const pick = (categoryId: string) => {
+    updateTransaction(tx.id, { categoryId });
+    if (index + 1 >= queue.length) {
+      onDone();
+    } else {
+      setIndex((i) => i + 1);
+    }
+  };
+
+  const skip = () => {
+    if (index + 1 >= queue.length) {
+      onDone();
+    } else {
+      setIndex((i) => i + 1);
+    }
+  };
+
+  const date = new Date(tx.date).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+  const amountStr = tx.amount.toLocaleString('ru-RU', { maximumFractionDigits: 0 }) + ' ₽';
+
+  return (
+    <AnimatePresence mode="wait">
+      <motion.div
+        key={tx.id}
+        initial={{ opacity: 0, x: 40 }}
+        animate={{ opacity: 1, x: 0 }}
+        exit={{ opacity: 0, x: -40 }}
+        transition={{ duration: 0.22 }}
+        className="py-2"
+      >
+        {/* Progress */}
+        <div className="flex items-center justify-between mb-4">
+          <span className="text-xs text-gray-400">Уточните категорию</span>
+          <span className="text-xs font-semibold text-purple-500">{progress} / {total}</span>
+        </div>
+        <div className="flex gap-1 mb-5">
+          {Array.from({ length: total }).map((_, i) => (
+            <div
+              key={i}
+              className="h-1 flex-1 rounded-full transition-all"
+              style={{ background: i < progress ? '#6C63FF' : '#E5E7EB' }}
+            />
+          ))}
+        </div>
+
+        {/* Transaction card */}
+        <div
+          className="rounded-2xl p-4 mb-5"
+          style={{ background: 'linear-gradient(135deg, #F0EEFF, #E8E4FF)' }}
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex-1 min-w-0">
+              <div className="font-semibold text-gray-800 text-sm leading-snug truncate">
+                {tx.description || 'Без описания'}
+              </div>
+              <div className="text-xs text-gray-400 mt-0.5">{date}</div>
+            </div>
+            <div
+              className="text-lg font-bold flex-shrink-0"
+              style={{ color: tx.type === 'income' ? '#10B981' : '#EF4444' }}
+            >
+              {tx.type === 'income' ? '+' : '−'}{amountStr}
+            </div>
+          </div>
+        </div>
+
+        {/* Category chips */}
+        <div className="grid grid-cols-3 gap-2 mb-4">
+          {cats.map((cat) => (
+            <motion.button
+              key={cat.id}
+              whileTap={{ scale: 0.93 }}
+              onClick={() => pick(cat.id)}
+              className="flex flex-col items-center gap-1 py-3 rounded-2xl text-center haptic"
+              style={{
+                background: tx.categoryId === cat.id ? '#6C63FF' : '#F3F4F6',
+                color: tx.categoryId === cat.id ? '#fff' : '#374151',
+              }}
+            >
+              <span className="text-xl leading-none">{cat.icon}</span>
+              <span className="text-xs font-medium leading-tight">{cat.name}</span>
+            </motion.button>
+          ))}
+        </div>
+
+        {/* Skip */}
+        <button
+          onClick={skip}
+          className="w-full py-2 text-xs text-gray-400 haptic"
+        >
+          Пропустить →
+        </button>
+      </motion.div>
+    </AnimatePresence>
+  );
+}
+
+// ─── File Import Modal ────────────────────────────────────────────────────────
+
 function FileImportModal({ onClose }: { onClose: () => void }) {
-  const { addTransaction } = useFinanceStore();
+  const { addTransaction, transactions: allTransactions } = useFinanceStore();
   const { openModal, closeModal } = useUIStore();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -189,6 +344,10 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStep, setProcessingStep] = useState('');
   const [dragOver, setDragOver] = useState(false);
+  /** IDs of imported transactions that need category clarification */
+  const [clarifyIds, setClarifyIds] = useState<string[]>([]);
+  /** Whether we're in the clarification step (after result screen) */
+  const [clarifying, setClarifying] = useState(false);
 
   useEffect(() => {
     openModal();
@@ -251,6 +410,9 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
           await new Promise((r) => setTimeout(r, 600));
         }
 
+        // Snapshot IDs before import so we can identify newly added transactions
+        const idsBefore = new Set(useFinanceStore.getState().transactions.map((t) => t.id));
+
         let imported = 0;
         finalTransactions.forEach((tx: ParsedBankTx) => {
           addTransaction(tx);
@@ -265,6 +427,16 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
           cancelScheduledUpload(); // cancel pending debounce to avoid double-write
           forceSyncToCloud().catch(() => {/* ignore — local data is safe */});
         }
+
+        // Collect IDs of newly imported transactions that are uncategorized (other_exp/other_inc)
+        // and large enough to be worth asking about. Cap at MAX_CLARIFY, sorted by amount desc.
+        const newTxs = useFinanceStore.getState().transactions.filter((t) => !idsBefore.has(t.id));
+        const toAsk = newTxs
+          .filter((t) => (t.categoryId === 'other_exp' || t.categoryId === 'other_inc') && t.amount >= MIN_CLARIFY_AMOUNT)
+          .sort((a, b) => b.amount - a.amount)
+          .slice(0, MAX_CLARIFY)
+          .map((t) => t.id);
+        setClarifyIds(toAsk);
 
         setResult({ imported, skipped, errors, bankName, preCategCount, needsGroqCount });
       } else {
@@ -471,10 +643,18 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
               )}
             </div>
           )}
+
+          {/* Category clarification step — shown after result when there are unknowns */}
+          {clarifying && clarifyIds.length > 0 && (
+            <ClarifyCategoryStep
+              txIds={clarifyIds}
+              onDone={onClose}
+            />
+          )}
         </div>
 
         {/* Fixed footer — always visible, never scrolls away */}
-        {result && (
+        {result && !clarifying && (
           <div
             className="flex-shrink-0 px-6 pt-3 border-t border-gray-100"
             style={{ paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' }}
@@ -482,7 +662,7 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
             <div className="flex gap-2">
               <motion.button
                 whileTap={{ scale: 0.97 }}
-                onClick={() => { setResult(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
+                onClick={() => { setResult(null); setClarifyIds([]); if (fileInputRef.current) fileInputRef.current.value = ''; }}
                 className="flex-1 py-3 rounded-2xl font-semibold text-sm haptic"
                 style={{ background: '#F0EEFF', color: '#6C63FF' }}
               >
@@ -490,11 +670,17 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
               </motion.button>
               <motion.button
                 whileTap={{ scale: 0.97 }}
-                onClick={onClose}
+                onClick={() => {
+                  if (clarifyIds.length > 0) {
+                    setClarifying(true);
+                  } else {
+                    onClose();
+                  }
+                }}
                 className="flex-1 py-3 text-white rounded-2xl font-bold text-sm haptic"
                 style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}
               >
-                Готово →
+                {clarifyIds.length > 0 ? `Уточнить ${clarifyIds.length} →` : 'Готово →'}
               </motion.button>
             </div>
           </div>
