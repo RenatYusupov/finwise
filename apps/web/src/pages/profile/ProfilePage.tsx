@@ -8,13 +8,9 @@ import { formatCurrency } from '@/shared/utils/format';
 import { parseBankXLSX, parseTbankPDF, parseCSV, rowToTransactionGeneric } from './bankImport';
 import type { ParsedBankTx } from './bankImport';
 import { PostImportWizard } from './PostImportWizard';
+import { apiClient } from '@/shared/api/client';
 
-// ─── Groq Categorization ──────────────────────────────────────────────────────
-
-const _a = 'gsk_cRht0YjK6MMoLUHOJF0x';
-const _b = 'WGdyb3FYDWRV7a5stOC1By';
-const _c = 'kJtnqeLgTW';
-const GROQ_API_KEY = _a + _b + _c;
+// ─── Groq Categorization (via backend /api/ai/categorize) ────────────────────
 
 const VALID_CATEGORY_IDS = new Set([
   'food', 'transport', 'shopping', 'health', 'entertainment',
@@ -22,47 +18,10 @@ const VALID_CATEGORY_IDS = new Set([
   'salary', 'freelance', 'gift', 'investment', 'cashback', 'other_inc',
 ]);
 
-const GROQ_CATEGORIZE_PROMPT = `Ты финансовый ассистент. Тебе дан список банковских транзакций в формате JSON.
-Каждая транзакция содержит поля: idx (индекс), description (описание из банка), bankCategory (категория банка), type (expense/income).
-Используй ОБА поля — description И bankCategory — для определения категории.
-Верни ТОЛЬКО JSON массив с полями "idx" и "categoryId".
-
-КАТЕГОРИИ РАСХОДОВ (type=expense):
-food — продукты, супермаркет, пятёрочка, магнит, вкусвилл, лента, ашан, дикси, окей, глобус, fix price
-cafe — кофе, кафе, ресторан, бар, столовая, фастфуд, доставка еды, макдоналдс, kfc, бургер, пицца, суши, шаурма, самокат, яндекс еда, delivery
-transport — метро, такси, автобус, электричка, ржд, поезд, бензин, азс, парковка, каршеринг, яндекс такси, uber, ситидрайв, делимобиль, аэроэкспресс
-shopping — одежда, wildberries, ozon, lamoda, aliexpress, amazon, zara, h&m, uniqlo, adidas, nike, мвидео, эльдорадо, dns, ситилинк, икеа, леруа, спортмастер, декатлон, электроника, ювелирные
-health — аптека, лекарства, врач, клиника, больница, стоматолог, лаборатория, инвитро, гемотест, helix, 36.6, горздрав, ригла, оптика, медицин
-entertainment — кино, театр, концерт, netflix, spotify, яндекс плюс, apple music, youtube, steam, playstation, xbox, боулинг, музей, парк, аттракцион, кинопоиск, okko, иви
-sport — фитнес, спортзал, gym, бассейн, йога, тренажёр, world class, x-fit, alex fitness
-beauty — салон, маникюр, педикюр, парикмахер, барбер, косметика, л'этуаль, рив гош, золотое яблоко
-home — аренда, жкх, коммунал, квартплата, ипотека, электричество, газ, вода, отопление, интернет, мтс, мегафон, билайн, теле2, ростелеком, ремонт, мебель, уборка
-education — курсы, обучение, школа, университет, книги, литрес, skillbox, нетология, coursera, udemy, яндекс практикум, репетитор
-travel — отель, авиабилет, аэропорт, booking, airbnb, туту, aviasales, путешествие, экскурсия, туризм
-other_exp — всё остальное (расход), снятие наличных, банкомат, переводы физлицам без явной цели
-
-КАТЕГОРИИ ДОХОДОВ (type=income):
-salary — зарплата, аванс, оклад, премия, зачисление зарплат
-freelance — фриланс, подработка, гонорар, проект
-gift — подарок, дарение
-investment — ТОЛЬКО реальный инвестиционный доход: дивиденды, купоны по облигациям, проценты по вкладу/депозиту. НЕ использовать для переводов на брокерский счёт или пополнения ИИС.
-cashback — кэшбэк, возврат средств, refund, возвраты к физику
-other_inc — прочие доходы, переводы от физлиц, пополнения счёта
-
-ВАЖНЫЕ ПРАВИЛА:
-- Если bankCategory = "Финансовые операции" и type=expense — это скорее всего shopping или other_exp, НЕ investment
-- Если bankCategory = "Переводы" — это other_exp (расход) или other_inc (доход)
-- Пополнение брокерского счёта / ИИС — это other_exp, НЕ investment
-- investment только для ВХОДЯЩИХ дивидендов/процентов (type=income)
-
-ВАЖНО: Верни ТОЛЬКО JSON массив. Никакого текста до или после. Только [...].
-Пример: [{"idx":0,"categoryId":"food"},{"idx":1,"categoryId":"transport"},{"idx":2,"categoryId":"salary"}]`;
-
 async function recategorizeWithGroq(transactions: ParsedBankTx[]): Promise<ParsedBankTx[]> {
   if (transactions.length === 0) return transactions;
 
   // Only send transactions that were NOT already confidently categorized by MCC/keyword.
-  // This dramatically reduces Groq API calls for Alfa Bank imports where MCC covers ~90% of ops.
   const needsGroq = transactions
     .map((tx, idx) => ({ tx, idx }))
     .filter(({ tx }) => !tx.categoryConfident);
@@ -72,82 +31,50 @@ async function recategorizeWithGroq(transactions: ParsedBankTx[]): Promise<Parse
     return transactions;
   }
 
-  console.log(`[bankImport] Sending ${needsGroq.length}/${transactions.length} transactions to Groq`);
+  console.log(`[bankImport] Sending ${needsGroq.length}/${transactions.length} transactions to backend /ai/categorize`);
 
-  // Send in batches of 30 to stay within token limits
-  const BATCH_SIZE = 30;
   const result: ParsedBankTx[] = [...transactions];
 
-  for (let b = 0; b < needsGroq.length; b += BATCH_SIZE) {
-    const batchItems = needsGroq.slice(b, b + BATCH_SIZE);
-    // Use sequential batch indices (0, 1, 2…) in the Groq payload,
-    // but map them back to the original transaction indices after.
-    const payload = batchItems.map((item, batchIdx) => ({
+  try {
+    // Send all uncategorized transactions to backend in one request (backend handles batching)
+    const payload = needsGroq.map((item, batchIdx) => ({
       idx: batchIdx,
       description: item.tx.description,
       bankCategory: item.tx.bankCategory,
       type: item.tx.type,
+      amount: item.tx.amount,
     }));
 
-    try {
-      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${GROQ_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: 'llama-3.1-8b-instant',
-          messages: [
-            { role: 'system', content: GROQ_CATEGORIZE_PROMPT },
-            { role: 'user', content: JSON.stringify(payload) },
-          ],
-          temperature: 0.1,
-          max_tokens: 1024,
-        }),
-      });
+    const response = await apiClient.post<{ data: Array<{ idx: number; categoryId: string }> }>(
+      '/ai/categorize',
+      { transactions: payload }
+    );
 
-      if (!response.ok) {
-        console.warn('[bankImport] Groq categorize error:', response.status);
-        continue;
+    const arr = response.data?.data ?? [];
+
+    for (const item of arr) {
+      if (
+        typeof item.idx === 'number' &&
+        item.idx >= 0 &&
+        item.idx < needsGroq.length &&
+        VALID_CATEGORY_IDS.has(item.categoryId)
+      ) {
+        // Map batch index back to original transaction index
+        const origIdx = needsGroq[item.idx]!.idx;
+        const orig = result[origIdx]!;
+        result[origIdx] = {
+          type: orig.type,
+          amount: orig.amount,
+          description: orig.description,
+          bankCategory: orig.bankCategory,
+          date: orig.date,
+          categoryId: item.categoryId,
+          categoryConfident: true,
+        };
       }
-
-      const data = await response.json();
-      const content: string = (data.choices?.[0]?.message?.content ?? '').trim();
-
-      let arr: { idx: number; categoryId: string }[] = [];
-      // 3-strategy JSON extraction: direct parse → regex match → object unwrap
-      try { arr = JSON.parse(content); } catch {
-        const match = content.match(/\[[\s\S]*\]/);
-        if (match) {
-          try { arr = JSON.parse(match[0]); } catch { /* skip */ }
-        }
-      }
-
-      for (const item of arr) {
-        if (
-          typeof item.idx === 'number' &&
-          item.idx >= 0 &&
-          item.idx < batchItems.length &&
-          VALID_CATEGORY_IDS.has(item.categoryId)
-        ) {
-          // Map batch index back to original transaction index
-          const origIdx = batchItems[item.idx]!.idx;
-          const orig = result[origIdx]!;
-          result[origIdx] = {
-            type: orig.type,
-            amount: orig.amount,
-            description: orig.description,
-            bankCategory: orig.bankCategory,
-            date: orig.date,
-            categoryId: item.categoryId,
-            categoryConfident: true,
-          };
-        }
-      }
-    } catch (err) {
-      console.warn('[bankImport] Groq batch error:', err);
     }
+  } catch (err) {
+    console.warn('[bankImport] Backend categorize error:', err);
   }
 
   return result;
@@ -172,6 +99,8 @@ const ACHIEVEMENTS = [
 type ImportResult = {
   imported: number;
   skipped: number;
+  /** Transactions skipped because they were exact duplicates */
+  dedupSkipped?: number;
   errors: string[];
   bankName?: string;
   /** Transactions categorized by MCC/keyword — did NOT need Groq */
@@ -370,7 +299,7 @@ function ClarifyCategoryStep({
 // ─── File Import Modal ────────────────────────────────────────────────────────
 
 function FileImportModal({ onClose }: { onClose: () => void }) {
-  const { addTransaction, transactions: allTransactions } = useFinanceStore();
+  const { addTransactionsBatch, transactions: allTransactions } = useFinanceStore();
   const { openModal, closeModal } = useUIStore();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -448,11 +377,7 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
         // Snapshot IDs before import so we can identify newly added transactions
         const idsBefore = new Set(useFinanceStore.getState().transactions.map((t) => t.id));
 
-        let imported = 0;
-        finalTransactions.forEach((tx: ParsedBankTx) => {
-          addTransaction(tx);
-          imported++;
-        });
+        const { imported, skipped: dedupSkipped } = addTransactionsBatch(finalTransactions);
 
         // Fire cloud sync in the background — do NOT await it.
         // Data is already safely in localStorage at this point.
@@ -470,7 +395,7 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
         const toAsk = computeClarifyQueue(newTxs, stateAfter.transactions);
         setClarifyIds(toAsk);
 
-        setResult({ imported, skipped, errors, bankName, preCategCount, needsGroqCount });
+        setResult({ imported, skipped: skipped + dedupSkipped, dedupSkipped, errors, bankName, preCategCount, needsGroqCount });
       } else {
         setProcessingStep('Разбираем файл...');
         const text = await new Promise<string>((resolve, reject) => {
@@ -493,19 +418,19 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
           rows = parseCSV(text);
         }
 
-        let imported = 0;
-        let skipped = 0;
+        let parseSkipped = 0;
+        const validTxs: ParsedBankTx[] = [];
         rows.forEach((row, i) => {
           const tx = rowToTransactionGeneric(row);
           if (tx) {
-            addTransaction(tx);
-            imported++;
+            validTxs.push(tx);
           } else {
-            skipped++;
+            parseSkipped++;
             if (errors.length < 3) errors.push(`Строка ${i + 2}: неверный формат`);
           }
         });
-        setResult({ imported, skipped, errors, preCategCount: 0, needsGroqCount: 0 });
+        const { imported, skipped: dedupSkipped } = addTransactionsBatch(validTxs);
+        setResult({ imported, skipped: parseSkipped + dedupSkipped, dedupSkipped, errors, preCategCount: 0, needsGroqCount: 0 });
       }
     } catch (err) {
       errors.push('Ошибка разбора файла: ' + (err instanceof Error ? err.message : 'неизвестная ошибка'));
@@ -647,21 +572,30 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
                   <div className="text-xs text-red-400">Пропущено</div>
                 </div>
               </div>
+              {(result.dedupSkipped ?? 0) > 0 && (
+                <div className="rounded-2xl p-3 mb-3 text-center" style={{ background: 'linear-gradient(135deg, #FFF8E8, #FFF0C8)' }}>
+                  <div className="text-sm font-bold text-amber-600">🔁 {result.dedupSkipped} дублей пропущено</div>
+                  <div className="text-xs text-amber-500 mt-0.5">Эти транзакции уже есть в вашей истории</div>
+                </div>
+              )}
               {result.imported > 0 && (
                 <div className="rounded-2xl p-4 mb-4 text-left" style={{ background: '#F0FFF8', border: '1px solid rgba(0,200,150,0.2)' }}>
                   <div className="text-sm font-bold text-green-700 mb-1">✅ Что сделано</div>
                   <div className="text-xs text-green-600 leading-relaxed space-y-1">
                     {(result.preCategCount ?? 0) > 0 && (
-                      <div>• {result.preCategCount} транзакций категоризированы по MCC/ключевым словам</div>
-                    )}
-                    {(result.needsGroqCount ?? 0) > 0 && (
-                      <div>• {result.needsGroqCount} транзакций уточнены через Groq AI</div>
-                    )}
-                    {(result.needsGroqCount ?? 0) === 0 && (result.preCategCount ?? 0) > 0 && (
-                      <div>• Groq AI не потребовался — все категории определены точно</div>
-                    )}
-                    <div>• Внутренние переводы между счетами пропущены</div>
-                    <div>• Описания очищены от технических данных</div>
+                        <div>• {result.preCategCount} транзакций категоризированы по MCC/ключевым словам</div>
+                      )}
+                      {(result.needsGroqCount ?? 0) > 0 && (
+                        <div>• {result.needsGroqCount} транзакций уточнены через Groq AI</div>
+                      )}
+                      {(result.needsGroqCount ?? 0) === 0 && (result.preCategCount ?? 0) > 0 && (
+                        <div>• Groq AI не потребовался — все категории определены точно</div>
+                      )}
+                      {(result.dedupSkipped ?? 0) > 0 && (
+                        <div>• {result.dedupSkipped} дублей автоматически пропущено</div>
+                      )}
+                      <div>• Внутренние переводы между счетами пропущены</div>
+                      <div>• Описания очищены от технических данных</div>
                   </div>
                 </div>
               )}

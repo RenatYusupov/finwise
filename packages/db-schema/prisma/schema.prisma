@@ -279,3 +279,70 @@ model UserChallenge {
   @@unique([userId, challengeId])
   @@map("user_challenges")
 }
+
+// ── Finance Service Models (telegramId-based, no User FK) ────────────────────
+// These are used by finance-service directly with telegramId from JWT.
+// Simpler, stateless — no dependency on auth-service DB.
+
+model FinTransaction {
+  id                String   @id @default(cuid())
+  telegramId        BigInt
+  amount            Float
+  type              String   // "expense" | "income"
+  category          String
+  description       String   @default("")
+  date              DateTime
+  userCorrected     Boolean  @default(false)
+  requiresUserInput Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([telegramId, date])
+  @@index([telegramId, type])
+  @@map("fin_transactions")
+}
+
+model FinBudget {
+  id         String   @id @default(cuid())
+  telegramId BigInt
+  category   String
+  limit      Float
+  period     String   @default("month")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([telegramId])
+  @@map("fin_budgets")
+}
+
+model FinGoal {
+  id            String    @id @default(cuid())
+  telegramId    BigInt
+  title         String
+  targetAmount  Float
+  currentAmount Float     @default(0)
+  deadline      DateTime?
+  categoryId    String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([telegramId])
+  @@map("fin_goals")
+}
+
+model FinRecurringPayment {
+  id         String   @id @default(cuid())
+  telegramId BigInt
+  label      String
+  amount     Float
+  dayOfMonth Int      @default(1)
+  category   String
+  active     Boolean  @default(true)
+  confidence Float    @default(0.5)
+  lastSeen   DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([telegramId])
+  @@map("fin_recurring_payments")
+}

@@ -1,392 +1,524 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
+import fjwt from '@fastify/jwt';
 import { PrismaClient } from '@finwise/db-schema';
-import jwt from 'jsonwebtoken';
+
+// ── Startup validation ────────────────────────────────────────────────────────
+
+const JWT_SECRET = process.env.JWT_SECRET ?? '';
+if (!JWT_SECRET) {
+  console.error('[finance-service] FATAL: JWT_SECRET environment variable is required');
+  process.exit(1);
+}
+
+// ── App setup ─────────────────────────────────────────────────────────────────
 
 const app = Fastify({ logger: true });
 const prisma = new PrismaClient();
-const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-secret-change-in-production';
 
 await app.register(cors, { origin: true });
 await app.register(helmet);
+await app.register(fjwt, { secret: JWT_SECRET });
 
-// ── Auth middleware helper ─────────────────────────────────────────────────────
+// ── Auth middleware ───────────────────────────────────────────────────────────
 
-function getUserId(authHeader: string | undefined): string | null {
-  if (!authHeader?.startsWith('Bearer ')) return null;
+interface JwtPayload {
+  sub: string; // telegramId as string
+  firstName: string;
+  lastName: string | null;
+  username: string | null;
+}
+
+async function getTelegramId(req: any, reply: any): Promise<bigint | null> {
+  const authHeader: string | undefined = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    reply.status(401).send({ error: 'Unauthorized' });
+    return null;
+  }
   try {
-    const payload = jwt.verify(authHeader.slice(7), JWT_SECRET) as { sub: string };
-    return payload.sub;
+    const payload = await req.jwtVerify() as JwtPayload;
+    return BigInt(payload.sub);
   } catch {
+    reply.status(401).send({ error: 'Invalid or expired token' });
     return null;
   }
 }
 
-// ── Seed default categories ───────────────────────────────────────────────────
+// ── Health ────────────────────────────────────────────────────────────────────
 
-const DEFAULT_CATEGORIES = [
-  { key: 'food', name: 'Еда и рестораны', icon: '🍕', color: '#FF6B6B', type: 'expense' },
-  { key: 'transport', name: 'Транспорт', icon: '🚗', color: '#4ECDC4', type: 'expense' },
-  { key: 'shopping', name: 'Покупки', icon: '🛍️', color: '#45B7D1', type: 'expense' },
-  { key: 'entertainment', name: 'Развлечения', icon: '🎬', color: '#96CEB4', type: 'expense' },
-  { key: 'health', name: 'Здоровье', icon: '💊', color: '#FFEAA7', type: 'expense' },
-  { key: 'housing', name: 'Жильё', icon: '🏠', color: '#DDA0DD', type: 'expense' },
-  { key: 'utilities', name: 'Коммунальные', icon: '💡', color: '#98D8C8', type: 'expense' },
-  { key: 'education', name: 'Образование', icon: '📚', color: '#F7DC6F', type: 'expense' },
-  { key: 'travel', name: 'Путешествия', icon: '✈️', color: '#85C1E9', type: 'expense' },
-  { key: 'other_expense', name: 'Другое', icon: '📦', color: '#BDC3C7', type: 'expense' },
-  { key: 'salary', name: 'Зарплата', icon: '💼', color: '#2ECC71', type: 'income' },
-  { key: 'freelance', name: 'Фриланс', icon: '💻', color: '#27AE60', type: 'income' },
-  { key: 'investment', name: 'Инвестиции', icon: '📈', color: '#1ABC9C', type: 'income' },
-  { key: 'gift', name: 'Подарки', icon: '🎁', color: '#F39C12', type: 'income' },
-  { key: 'other_income', name: 'Другой доход', icon: '💰', color: '#16A085', type: 'income' },
-];
-
-// Seed categories on startup
-async function seedCategories() {
-  for (const cat of DEFAULT_CATEGORIES) {
-    await prisma.category.upsert({
-      where: { id: cat.key },
-      create: { id: cat.key, ...cat, isSystem: true },
-      update: {},
-    });
+app.get('/health', async (_req: any, reply: any) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    return reply.send({ status: 'ok', service: 'finance-service', db: 'connected' });
+  } catch {
+    return reply.status(503).send({ status: 'error', service: 'finance-service', db: 'disconnected' });
   }
-}
+});
 
 // ── Transactions ──────────────────────────────────────────────────────────────
 
 app.get('/transactions', async (req: any, reply: any) => {
-  const userId = getUserId(req.headers.authorization);
-  if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
 
-  const { type, limit = '50', offset = '0', dateFrom, dateTo } = req.query as Record<string, string>;
+  const { from, to, category, type, limit = '50', offset = '0' } = req.query as Record<string, string>;
 
-  const where: any = { userId };
+  const where: any = { telegramId };
   if (type) where.type = type;
-  if (dateFrom || dateTo) {
+  if (category) where.category = category;
+  if (from || to) {
     where.date = {};
-    if (dateFrom) where.date.gte = dateFrom;
-    if (dateTo) where.date.lte = dateTo;
+    if (from) where.date.gte = new Date(from);
+    if (to) where.date.lte = new Date(to + 'T23:59:59.999Z');
   }
 
-  const transactions = await prisma.transaction.findMany({
-    where,
-    include: { category: true, account: true },
-    orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
-    take: parseInt(limit),
-    skip: parseInt(offset),
-  });
+  const parsedLimit = Math.min(parseInt(limit, 10) || 50, 1000);
+  const parsedOffset = parseInt(offset, 10) || 0;
 
-  return reply.send({ data: transactions });
+  const [transactions, total] = await Promise.all([
+    prisma.finTransaction.findMany({
+      where,
+      orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
+      take: parsedLimit,
+      skip: parsedOffset,
+    }),
+    prisma.finTransaction.count({ where }),
+  ]);
+
+  return reply.send({ data: transactions, total, limit: parsedLimit, offset: parsedOffset });
 });
 
 app.post('/transactions', async (req: any, reply: any) => {
-  const userId = getUserId(req.headers.authorization);
-  if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
 
-  const { accountId, categoryId, type, amount, description, date } = req.body;
+  const { id, amount, type, category, description, date, userCorrected, requiresUserInput } = req.body ?? {};
 
-  // Get default account if not specified
-  const account = accountId
-    ? await prisma.account.findFirst({ where: { id: accountId, userId } })
-    : await prisma.account.findFirst({ where: { userId, isDefault: true } });
+  if (!amount || parseFloat(amount) <= 0) return reply.status(400).send({ error: 'amount must be positive' });
+  if (!type || !['expense', 'income'].includes(type)) return reply.status(400).send({ error: 'type must be expense or income' });
 
-  if (!account) return reply.status(400).send({ error: 'Account not found' });
-
-  const tx = await prisma.transaction.create({
+  const tx = await prisma.finTransaction.create({
     data: {
-      userId,
-      accountId: account.id,
-      categoryId: categoryId || null,
-      type,
+      ...(id ? { id } : {}),
+      telegramId,
       amount: parseFloat(amount),
-      description,
-      date: date ?? new Date().toISOString().split('T')[0],
+      type,
+      category: category ?? 'other_exp',
+      description: description ?? '',
+      date: date ? new Date(date) : new Date(),
+      userCorrected: userCorrected ?? false,
+      requiresUserInput: requiresUserInput ?? false,
     },
-    include: { category: true, account: true },
   });
-
-  // Update account balance
-  const balanceDelta = type === 'income' ? tx.amount : type === 'expense' ? -tx.amount : 0;
-  await prisma.account.update({
-    where: { id: account.id },
-    data: { balance: { increment: balanceDelta } },
-  });
-
-  // Update budget spent
-  if (categoryId && type === 'expense') {
-    const today = new Date().toISOString().split('T')[0] ?? '';
-    const budget = await prisma.budget.findFirst({
-      where: {
-        userId,
-        categoryId,
-        startDate: { lte: today },
-        endDate: { gte: today },
-      },
-    });
-    if (budget) {
-      await prisma.budget.update({
-        where: { id: budget.id },
-        data: { spent: { increment: tx.amount } },
-      });
-    }
-  }
-
-  // Update streak
-  await updateStreak(userId);
 
   return reply.status(201).send({ data: tx });
 });
 
+app.put('/transactions/:id', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
+
+  const existing = await prisma.finTransaction.findFirst({ where: { id: req.params.id, telegramId } });
+  if (!existing) return reply.status(404).send({ error: 'Not found' });
+
+  const { amount, type, category, description, date, userCorrected } = req.body ?? {};
+  if (amount !== undefined && parseFloat(amount) <= 0) return reply.status(400).send({ error: 'amount must be positive' });
+
+  const updated = await prisma.finTransaction.update({
+    where: { id: existing.id },
+    data: {
+      ...(amount !== undefined ? { amount: parseFloat(amount) } : {}),
+      ...(type !== undefined ? { type } : {}),
+      ...(category !== undefined ? { category } : {}),
+      ...(description !== undefined ? { description } : {}),
+      ...(date !== undefined ? { date: new Date(date) } : {}),
+      ...(userCorrected !== undefined ? { userCorrected } : {}),
+    },
+  });
+
+  return reply.send({ data: updated });
+});
+
 app.delete('/transactions/:id', async (req: any, reply: any) => {
-  const userId = getUserId(req.headers.authorization);
-  if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
 
-  const tx = await prisma.transaction.findFirst({
-    where: { id: req.params.id, userId },
-  });
-  if (!tx) return reply.status(404).send({ error: 'Not found' });
+  const existing = await prisma.finTransaction.findFirst({ where: { id: req.params.id, telegramId } });
+  if (!existing) return reply.status(404).send({ error: 'Not found' });
 
-  await prisma.transaction.delete({ where: { id: tx.id } });
-
-  // Reverse balance
-  const balanceDelta = tx.type === 'income' ? -tx.amount : tx.type === 'expense' ? tx.amount : 0;
-  await prisma.account.update({
-    where: { id: tx.accountId },
-    data: { balance: { increment: balanceDelta } },
-  });
-
+  await prisma.finTransaction.delete({ where: { id: existing.id } });
   return reply.send({ data: { success: true } });
 });
 
-// ── Categories ────────────────────────────────────────────────────────────────
+// POST /transactions/bulk — upsert up to 500 transactions
+app.post('/transactions/bulk', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
 
-app.get('/categories', async (req: any, reply: any) => {
-  const userId = getUserId(req.headers.authorization);
-  if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
+  const { transactions } = req.body ?? {};
+  if (!Array.isArray(transactions)) return reply.status(400).send({ error: 'transactions must be an array' });
+  if (transactions.length > 500) return reply.status(400).send({ error: 'Maximum 500 transactions per bulk request' });
 
-  const { type } = req.query as { type?: string };
-  const where: any = { OR: [{ isSystem: true }, { userId }] };
-  if (type && type !== 'transfer') where.type = { in: [type, 'both'] };
+  let imported = 0;
+  let skipped = 0;
 
-  const categories = await prisma.category.findMany({ where, orderBy: { name: 'asc' } });
-  return reply.send({ data: categories });
-});
+  const BATCH = 50;
+  for (let i = 0; i < transactions.length; i += BATCH) {
+    const batch = transactions.slice(i, i + BATCH);
+    await Promise.all(
+      batch.map(async (tx: any) => {
+        if (!tx.amount || parseFloat(tx.amount) <= 0) { skipped++; return; }
+        try {
+          await prisma.finTransaction.upsert({
+            where: { id: tx.id ?? '' },
+            create: {
+              ...(tx.id ? { id: tx.id } : {}),
+              telegramId,
+              amount: parseFloat(tx.amount),
+              type: tx.type ?? 'expense',
+              category: tx.category ?? 'other_exp',
+              description: tx.description ?? '',
+              date: tx.date ? new Date(tx.date) : new Date(),
+              userCorrected: tx.userCorrected ?? false,
+              requiresUserInput: tx.requiresUserInput ?? false,
+            },
+            update: {
+              amount: parseFloat(tx.amount),
+              type: tx.type ?? 'expense',
+              category: tx.category ?? 'other_exp',
+              description: tx.description ?? '',
+              date: tx.date ? new Date(tx.date) : new Date(),
+              userCorrected: tx.userCorrected ?? false,
+            },
+          });
+          imported++;
+        } catch {
+          skipped++;
+        }
+      })
+    );
+  }
 
-// ── Accounts ──────────────────────────────────────────────────────────────────
-
-app.get('/accounts', async (req: any, reply: any) => {
-  const userId = getUserId(req.headers.authorization);
-  if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
-
-  const accounts = await prisma.account.findMany({ where: { userId } });
-  return reply.send({ data: accounts });
-});
-
-// ── Goals ─────────────────────────────────────────────────────────────────────
-
-app.get('/goals', async (req: any, reply: any) => {
-  const userId = getUserId(req.headers.authorization);
-  if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
-
-  const { status, limit } = req.query as { status?: string; limit?: string };
-  const where: any = { userId };
-  if (status) where.status = status;
-
-  const goals = await prisma.goal.findMany({
-    where,
-    orderBy: { createdAt: 'desc' },
-    take: limit ? parseInt(limit) : undefined,
-  });
-  return reply.send({ data: goals });
-});
-
-app.get('/goals/:id', async (req: any, reply: any) => {
-  const userId = getUserId(req.headers.authorization);
-  if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
-
-  const goal = await prisma.goal.findFirst({ where: { id: req.params.id, userId } });
-  if (!goal) return reply.status(404).send({ error: 'Not found' });
-  return reply.send({ data: goal });
-});
-
-app.post('/goals', async (req: any, reply: any) => {
-  const userId = getUserId(req.headers.authorization);
-  if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
-
-  const { name, icon, targetAmount, deadline } = req.body;
-  const goal = await prisma.goal.create({
-    data: { userId, name, icon, targetAmount: parseFloat(targetAmount), deadline: deadline ? new Date(deadline) : null },
-  });
-  return reply.status(201).send({ data: goal });
-});
-
-app.post('/goals/:id/deposit', async (req: any, reply: any) => {
-  const userId = getUserId(req.headers.authorization);
-  if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
-
-  const { amount } = req.body;
-  const goal = await prisma.goal.findFirst({ where: { id: req.params.id, userId } });
-  if (!goal) return reply.status(404).send({ error: 'Not found' });
-
-  const updated = await prisma.goal.update({
-    where: { id: goal.id },
-    data: {
-      currentAmount: { increment: parseFloat(amount) },
-      status: goal.currentAmount + parseFloat(amount) >= goal.targetAmount ? 'completed' : 'active',
-    },
-  });
-  return reply.send({ data: updated });
+  return reply.send({ data: { imported, skipped } });
 });
 
 // ── Budgets ───────────────────────────────────────────────────────────────────
 
 app.get('/budgets', async (req: any, reply: any) => {
-  const userId = getUserId(req.headers.authorization);
-  if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
 
-  const today = new Date().toISOString().split('T')[0] ?? '';
-  const budgets = await prisma.budget.findMany({
-    where: { userId, startDate: { lte: today }, endDate: { gte: today } },
-    include: { category: true },
-  });
+  const budgets = await prisma.finBudget.findMany({ where: { telegramId }, orderBy: { createdAt: 'desc' } });
   return reply.send({ data: budgets });
 });
 
-// ── Analytics ─────────────────────────────────────────────────────────────────
+app.post('/budgets', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
 
-app.get('/analytics/summary', async (req: any, reply: any) => {
-  const userId = getUserId(req.headers.authorization);
-  if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
+  const { id, category, limit, period } = req.body ?? {};
+  if (!category || !limit) return reply.status(400).send({ error: 'category and limit are required' });
 
-  const { period = 'month' } = req.query as { period?: string };
-  const now = new Date();
-  let dateFrom: string;
-
-  if (period === 'month') {
-    dateFrom = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
-  } else if (period === '3months') {
-    const d = new Date(now); d.setMonth(d.getMonth() - 3);
-    dateFrom = d.toISOString().split('T')[0] ?? '';
-  } else {
-    dateFrom = `${now.getFullYear()}-01-01`;
-  }
-
-  const dateTo = now.toISOString().split('T')[0] ?? '';
-
-  const transactions = await prisma.transaction.findMany({
-    where: { userId, date: { gte: dateFrom, lte: dateTo } },
-    include: { category: true },
+  const budget = await prisma.finBudget.upsert({
+    where: { id: id ?? '' },
+    create: { ...(id ? { id } : {}), telegramId, category, limit: parseFloat(limit), period: period ?? 'month' },
+    update: { category, limit: parseFloat(limit), period: period ?? 'month' },
   });
 
-  const totalIncome = transactions.filter((t) => t.type === 'income').reduce((s, t) => s + t.amount, 0);
-  const totalExpenses = transactions.filter((t) => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
-  const netSavings = totalIncome - totalExpenses;
-  const savingsRate = totalIncome > 0 ? (netSavings / totalIncome) * 100 : 0;
+  return reply.status(201).send({ data: budget });
+});
 
-  // Category breakdown
-  const categoryMap = new Map<string, { categoryId: string; categoryName: string; icon: string; color: string; amount: number }>();
-  for (const tx of transactions.filter((t) => t.type === 'expense')) {
-    const key = tx.categoryId ?? 'other';
-    const existing = categoryMap.get(key);
-    if (existing) {
-      existing.amount += tx.amount;
-    } else {
-      categoryMap.set(key, {
-        categoryId: key,
-        categoryName: tx.category?.name ?? 'Другое',
-        icon: tx.category?.icon ?? '📦',
-        color: tx.category?.color ?? '#BDC3C7',
-        amount: tx.amount,
-      });
-    }
+app.put('/budgets/:id', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
+
+  const existing = await prisma.finBudget.findFirst({ where: { id: req.params.id, telegramId } });
+  if (!existing) return reply.status(404).send({ error: 'Not found' });
+
+  const { category, limit, period } = req.body ?? {};
+  const updated = await prisma.finBudget.update({
+    where: { id: existing.id },
+    data: {
+      ...(category !== undefined ? { category } : {}),
+      ...(limit !== undefined ? { limit: parseFloat(limit) } : {}),
+      ...(period !== undefined ? { period } : {}),
+    },
+  });
+
+  return reply.send({ data: updated });
+});
+
+app.delete('/budgets/:id', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
+
+  const existing = await prisma.finBudget.findFirst({ where: { id: req.params.id, telegramId } });
+  if (!existing) return reply.status(404).send({ error: 'Not found' });
+
+  await prisma.finBudget.delete({ where: { id: existing.id } });
+  return reply.send({ data: { success: true } });
+});
+
+// ── Goals ─────────────────────────────────────────────────────────────────────
+
+app.get('/goals', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
+
+  const goals = await prisma.finGoal.findMany({ where: { telegramId }, orderBy: { createdAt: 'desc' } });
+  return reply.send({ data: goals });
+});
+
+app.post('/goals', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
+
+  const { id, title, targetAmount, currentAmount, deadline, categoryId } = req.body ?? {};
+  if (!title || !targetAmount) return reply.status(400).send({ error: 'title and targetAmount are required' });
+
+  const goal = await prisma.finGoal.upsert({
+    where: { id: id ?? '' },
+    create: {
+      ...(id ? { id } : {}),
+      telegramId,
+      title,
+      targetAmount: parseFloat(targetAmount),
+      currentAmount: parseFloat(currentAmount ?? 0),
+      deadline: deadline ? new Date(deadline) : null,
+      categoryId: categoryId ?? null,
+    },
+    update: {
+      title,
+      targetAmount: parseFloat(targetAmount),
+      currentAmount: parseFloat(currentAmount ?? 0),
+      deadline: deadline ? new Date(deadline) : null,
+      categoryId: categoryId ?? null,
+    },
+  });
+
+  return reply.status(201).send({ data: goal });
+});
+
+app.put('/goals/:id', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
+
+  const existing = await prisma.finGoal.findFirst({ where: { id: req.params.id, telegramId } });
+  if (!existing) return reply.status(404).send({ error: 'Not found' });
+
+  const { title, targetAmount, currentAmount, deadline, categoryId } = req.body ?? {};
+  const updated = await prisma.finGoal.update({
+    where: { id: existing.id },
+    data: {
+      ...(title !== undefined ? { title } : {}),
+      ...(targetAmount !== undefined ? { targetAmount: parseFloat(targetAmount) } : {}),
+      ...(currentAmount !== undefined ? { currentAmount: parseFloat(currentAmount) } : {}),
+      ...(deadline !== undefined ? { deadline: deadline ? new Date(deadline) : null } : {}),
+      ...(categoryId !== undefined ? { categoryId } : {}),
+    },
+  });
+
+  return reply.send({ data: updated });
+});
+
+app.delete('/goals/:id', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
+
+  const existing = await prisma.finGoal.findFirst({ where: { id: req.params.id, telegramId } });
+  if (!existing) return reply.status(404).send({ error: 'Not found' });
+
+  await prisma.finGoal.delete({ where: { id: existing.id } });
+  return reply.send({ data: { success: true } });
+});
+
+// ── Recurring Payments ────────────────────────────────────────────────────────
+
+app.get('/recurring-payments', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
+
+  const payments = await prisma.finRecurringPayment.findMany({ where: { telegramId }, orderBy: { createdAt: 'desc' } });
+  return reply.send({ data: payments });
+});
+
+app.post('/recurring-payments', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
+
+  const { id, label, amount, dayOfMonth, category, active, confidence, lastSeen } = req.body ?? {};
+  if (!label || !amount) return reply.status(400).send({ error: 'label and amount are required' });
+
+  const payment = await prisma.finRecurringPayment.upsert({
+    where: { id: id ?? '' },
+    create: {
+      ...(id ? { id } : {}),
+      telegramId,
+      label,
+      amount: parseFloat(amount),
+      dayOfMonth: parseInt(dayOfMonth ?? 1, 10),
+      category: category ?? 'other_exp',
+      active: active ?? true,
+      confidence: parseFloat(confidence ?? 0.5),
+      lastSeen: lastSeen ? new Date(lastSeen) : new Date(),
+    },
+    update: {
+      label,
+      amount: parseFloat(amount),
+      dayOfMonth: parseInt(dayOfMonth ?? 1, 10),
+      category: category ?? 'other_exp',
+      active: active ?? true,
+      confidence: parseFloat(confidence ?? 0.5),
+      lastSeen: lastSeen ? new Date(lastSeen) : new Date(),
+    },
+  });
+
+  return reply.status(201).send({ data: payment });
+});
+
+app.put('/recurring-payments/:id', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
+
+  const existing = await prisma.finRecurringPayment.findFirst({ where: { id: req.params.id, telegramId } });
+  if (!existing) return reply.status(404).send({ error: 'Not found' });
+
+  const { label, amount, dayOfMonth, category, active, confidence } = req.body ?? {};
+  const updated = await prisma.finRecurringPayment.update({
+    where: { id: existing.id },
+    data: {
+      ...(label !== undefined ? { label } : {}),
+      ...(amount !== undefined ? { amount: parseFloat(amount) } : {}),
+      ...(dayOfMonth !== undefined ? { dayOfMonth: parseInt(dayOfMonth, 10) } : {}),
+      ...(category !== undefined ? { category } : {}),
+      ...(active !== undefined ? { active } : {}),
+      ...(confidence !== undefined ? { confidence: parseFloat(confidence) } : {}),
+    },
+  });
+
+  return reply.send({ data: updated });
+});
+
+app.delete('/recurring-payments/:id', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
+
+  const existing = await prisma.finRecurringPayment.findFirst({ where: { id: req.params.id, telegramId } });
+  if (!existing) return reply.status(404).send({ error: 'Not found' });
+
+  await prisma.finRecurringPayment.delete({ where: { id: existing.id } });
+  return reply.send({ data: { success: true } });
+});
+
+// ── Sync ──────────────────────────────────────────────────────────────────────
+
+// GET /sync — return all user data in one request
+app.get('/sync', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
+
+  const [transactions, budgets, goals, recurringPayments] = await Promise.all([
+    prisma.finTransaction.findMany({ where: { telegramId }, orderBy: [{ date: 'desc' }], take: 1000 }),
+    prisma.finBudget.findMany({ where: { telegramId } }),
+    prisma.finGoal.findMany({ where: { telegramId } }),
+    prisma.finRecurringPayment.findMany({ where: { telegramId } }),
+  ]);
+
+  return reply.send({ data: { transactions, budgets, goals, recurringPayments } });
+});
+
+// POST /sync — full snapshot upsert (migration from CloudStorage)
+app.post('/sync', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
+
+  const { transactions = [], budgets = [], goals = [], recurringPayments = [] } = req.body ?? {};
+
+  let txImported = 0;
+  let txSkipped = 0;
+
+  const TX_BATCH = 50;
+  for (let i = 0; i < (transactions as any[]).length; i += TX_BATCH) {
+    const batch = (transactions as any[]).slice(i, i + TX_BATCH);
+    await Promise.all(
+      batch.map(async (tx: any) => {
+        if (!tx.id || !tx.amount || parseFloat(tx.amount) <= 0) { txSkipped++; return; }
+        try {
+          await prisma.finTransaction.upsert({
+            where: { id: tx.id },
+            create: {
+              id: tx.id,
+              telegramId,
+              amount: parseFloat(tx.amount),
+              type: tx.type ?? 'expense',
+              category: tx.categoryId ?? tx.category ?? 'other_exp',
+              description: tx.description ?? '',
+              date: tx.date ? new Date(tx.date) : new Date(),
+              userCorrected: tx.userCorrected ?? false,
+              requiresUserInput: tx.requiresUserInput ?? false,
+            },
+            update: {
+              amount: parseFloat(tx.amount),
+              type: tx.type ?? 'expense',
+              category: tx.categoryId ?? tx.category ?? 'other_exp',
+              description: tx.description ?? '',
+              date: tx.date ? new Date(tx.date) : new Date(),
+              userCorrected: tx.userCorrected ?? false,
+            },
+          });
+          txImported++;
+        } catch {
+          txSkipped++;
+        }
+      })
+    );
   }
 
-  const categoryBreakdown = Array.from(categoryMap.values())
-    .sort((a, b) => b.amount - a.amount)
-    .map((c) => ({ ...c, percentage: totalExpenses > 0 ? (c.amount / totalExpenses) * 100 : 0 }));
+  for (const b of budgets as any[]) {
+    if (!b.id) continue;
+    await prisma.finBudget.upsert({
+      where: { id: b.id },
+      create: { id: b.id, telegramId, category: b.categoryId ?? b.category ?? 'other_exp', limit: parseFloat(b.limit ?? b.amount ?? 0), period: b.period ?? 'month' },
+      update: { category: b.categoryId ?? b.category ?? 'other_exp', limit: parseFloat(b.limit ?? b.amount ?? 0), period: b.period ?? 'month' },
+    }).catch(() => {});
+  }
+
+  for (const g of goals as any[]) {
+    if (!g.id) continue;
+    await prisma.finGoal.upsert({
+      where: { id: g.id },
+      create: { id: g.id, telegramId, title: g.title ?? g.name ?? 'Цель', targetAmount: parseFloat(g.targetAmount ?? 0), currentAmount: parseFloat(g.currentAmount ?? g.savedAmount ?? 0), deadline: g.deadline ? new Date(g.deadline) : null, categoryId: g.categoryId ?? null },
+      update: { title: g.title ?? g.name ?? 'Цель', targetAmount: parseFloat(g.targetAmount ?? 0), currentAmount: parseFloat(g.currentAmount ?? g.savedAmount ?? 0), deadline: g.deadline ? new Date(g.deadline) : null, categoryId: g.categoryId ?? null },
+    }).catch(() => {});
+  }
+
+  for (const rp of recurringPayments as any[]) {
+    if (!rp.id) continue;
+    await prisma.finRecurringPayment.upsert({
+      where: { id: rp.id },
+      create: { id: rp.id, telegramId, label: rp.label ?? rp.description ?? 'Платёж', amount: parseFloat(rp.amount ?? 0), dayOfMonth: parseInt(rp.dayOfMonth ?? rp.expectedDay ?? 1, 10), category: rp.categoryId ?? rp.category ?? 'other_exp', active: rp.active ?? true, confidence: parseFloat(rp.confidence ?? 0.5), lastSeen: rp.lastSeen ? new Date(rp.lastSeen) : new Date() },
+      update: { label: rp.label ?? rp.description ?? 'Платёж', amount: parseFloat(rp.amount ?? 0), dayOfMonth: parseInt(rp.dayOfMonth ?? rp.expectedDay ?? 1, 10), category: rp.categoryId ?? rp.category ?? 'other_exp', active: rp.active ?? true, confidence: parseFloat(rp.confidence ?? 0.5), lastSeen: rp.lastSeen ? new Date(rp.lastSeen) : new Date() },
+    }).catch(() => {});
+  }
 
   return reply.send({
     data: {
-      totalIncome,
-      totalExpenses,
-      netSavings,
-      savingsRate,
-      categoryBreakdown,
-      period,
-      dateFrom,
-      dateTo,
+      transactions: { imported: txImported, skipped: txSkipped },
+      budgets: { synced: (budgets as any[]).length },
+      goals: { synced: (goals as any[]).length },
+      recurringPayments: { synced: (recurringPayments as any[]).length },
     },
   });
 });
-
-// ── Gamification ──────────────────────────────────────────────────────────────
-
-app.get('/gamification/streak', async (req: any, reply: any) => {
-  const userId = getUserId(req.headers.authorization);
-  if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
-
-  const streak = await prisma.userStreak.findUnique({ where: { userId } });
-  return reply.send({ data: streak ?? { currentStreak: 0, longestStreak: 0, level: 1, xp: 0 } });
-});
-
-app.get('/gamification/achievements', async (req: any, reply: any) => {
-  const userId = getUserId(req.headers.authorization);
-  if (!userId) return reply.status(401).send({ error: 'Unauthorized' });
-
-  const all = await prisma.achievement.findMany();
-  const userAchs = await prisma.userAchievement.findMany({ where: { userId } });
-  const unlockedMap = new Map(userAchs.map((ua) => [ua.achievementId, ua.unlockedAt]));
-
-  const result = all.map((ach) => ({
-    ...ach,
-    unlockedAt: unlockedMap.get(ach.id) ?? null,
-  }));
-
-  return reply.send({ data: result });
-});
-
-// ── Streak helper ─────────────────────────────────────────────────────────────
-
-async function updateStreak(userId: string) {
-  const today = new Date().toISOString().split('T')[0] ?? '';
-  const streak = await prisma.userStreak.findUnique({ where: { userId } });
-
-  if (!streak) return;
-
-  const lastActivity = streak.lastActivityAt?.toISOString().split('T')[0];
-  if (lastActivity === today) return; // Already updated today
-
-  const yesterday = new Date();
-  yesterday.setDate(yesterday.getDate() - 1);
-  const yesterdayStr = yesterday.toISOString().split('T')[0] ?? '';
-
-  const newStreak = lastActivity === yesterdayStr ? streak.currentStreak + 1 : 1;
-  const newLongest = Math.max(newStreak, streak.longestStreak);
-  const newXp = streak.xp + 10;
-  const newLevel = Math.floor(newXp / 100) + 1;
-
-  await prisma.userStreak.update({
-    where: { userId },
-    data: {
-      currentStreak: newStreak,
-      longestStreak: newLongest,
-      lastActivityAt: new Date(),
-      xp: newXp,
-      level: newLevel,
-    },
-  });
-}
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-const PORT = parseInt(process.env.FINANCE_SERVICE_PORT ?? '3002');
+const PORT = parseInt(process.env.FINANCE_SERVICE_PORT ?? '3002', 10);
 
 try {
-  await seedCategories();
   await app.listen({ port: PORT, host: '0.0.0.0' });
-  console.log(`Finance service running on port ${PORT}`);
+  console.log(`[finance-service] Running on port ${PORT}`);
 } catch (err) {
   app.log.error(err);
   process.exit(1);

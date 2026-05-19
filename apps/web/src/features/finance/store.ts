@@ -558,6 +558,8 @@ export interface FinanceState {
   lastActiveDate: string;
 
   addTransaction: (tx: Omit<Transaction, 'id' | 'category'>) => void;
+  /** Batch import with deduplication. Returns { imported, skipped } counts. */
+  addTransactionsBatch: (txs: Omit<Transaction, 'id' | 'category'>[]) => { imported: number; skipped: number };
   updateTransaction: (id: string, updates: Partial<Omit<Transaction, 'id'>>) => void;
   deleteTransaction: (id: string) => void;
   addGoal: (goal: Omit<Goal, 'id' | 'createdAt'>) => void;
@@ -609,6 +611,49 @@ export const useFinanceStore = create<FinanceState>()(
         set((s) => ({ transactions: [newTx, ...s.transactions] }));
         get().updateStreak();
         scheduleCloudUpload();
+      },
+
+      addTransactionsBatch: (txs) => {
+        // Build dedup key: date(10 chars)|amount|description(50 chars)
+        const dedupKey = (tx: Omit<Transaction, 'id' | 'category'>) =>
+          `${tx.date.slice(0, 10)}|${tx.amount}|${tx.description.slice(0, 50)}`;
+
+        const existing = get().transactions;
+        const existingKeys = new Set(existing.map(dedupKey));
+
+        let imported = 0;
+        let skipped = 0;
+        const newTxs: Transaction[] = [];
+
+        for (const tx of txs) {
+          const key = dedupKey(tx);
+          if (existingKeys.has(key)) {
+            skipped++;
+            continue;
+          }
+          existingKeys.add(key); // prevent duplicates within the batch itself
+          const category = getCategoryById(tx.categoryId) ?? {
+            id: tx.categoryId,
+            name: tx.categoryId,
+            icon: '📦',
+            color: '#6B7280',
+            type: 'expense' as const,
+          };
+          newTxs.push({
+            ...tx,
+            id: `tx_${Date.now()}_${Math.random().toString(36).slice(2)}_${imported}`,
+            category,
+          });
+          imported++;
+        }
+
+        if (newTxs.length > 0) {
+          set((s) => ({ transactions: [...newTxs, ...s.transactions] }));
+          get().updateStreak();
+          scheduleCloudUpload();
+        }
+
+        return { imported, skipped };
       },
 
       updateTransaction: (id, updates) => {

@@ -3,14 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useFinanceStore } from '@/features/finance/store';
 import { generateAiResponse } from '@/features/ai/smartResponses';
+import { apiClient } from '@/shared/api/client';
 
-// ─── Groq AI Chat ─────────────────────────────────────────────────────────────
-
-// Key split to avoid GitHub secret scanning — assembled at runtime
-const _a = 'gsk_cRht0YjK6MMoLUHOJF0x';
-const _b = 'WGdyb3FYDWRV7a5stOC1By';
-const _c = 'kJtnqeLgTW';
-const GROQ_API_KEY = _a + _b + _c;
+// ─── Groq AI Chat (via backend /api/ai/chat) ──────────────────────────────────
 
 function buildFinancialContext(store: {
   transactions: any[];
@@ -49,45 +44,18 @@ async function askGroqChat(
   financialContext: string,
   history: { role: 'user' | 'assistant'; content: string }[]
 ): Promise<string | null> {
-  const systemPrompt = `Ты FinWise — персональный финансовый советник в Telegram Mini App. Отвечай на русском языке, кратко и по делу (2-5 предложений). Используй эмодзи для наглядности. Давай конкретные советы на основе данных пользователя. Не повторяй вопрос пользователя.
-
-${financialContext}`;
-
   // Keep last 6 messages for context (3 exchanges)
-  const recentHistory = history.slice(-6).map((m) => ({
-    role: m.role,
-    content: m.content,
-  }));
+  const recentHistory = history.slice(-6);
 
   try {
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: 'llama-3.1-8b-instant',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          ...recentHistory,
-          { role: 'user', content: userMessage },
-        ],
-        temperature: 0.7,
-        max_tokens: 400,
-      }),
+    const response = await apiClient.post<{ data: { content: string } }>('/ai/chat', {
+      message: userMessage,
+      context: financialContext,
+      history: recentHistory,
     });
-
-    if (!response.ok) {
-      console.error('[AiChat] Groq error:', response.status);
-      return null;
-    }
-
-    const data = await response.json();
-    const content: string = (data.choices?.[0]?.message?.content ?? '').trim();
-    return content || null;
+    return response.data?.data?.content || null;
   } catch (err) {
-    console.error('[AiChat] Groq fetch error:', err);
+    console.error('[AiChat] Backend chat error:', err);
     return null;
   }
 }
