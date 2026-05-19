@@ -409,7 +409,7 @@ export function guessCategory(description: string, bankCategory: string, type: '
 // ─── Shared types ─────────────────────────────────────────────────────────────
 
 export interface ParsedBankTx {
-  type: 'expense' | 'income';
+  type: 'expense' | 'income' | 'transfer';
   amount: number;
   categoryId: string;
   description: string;
@@ -643,28 +643,49 @@ export async function parseBankXLSX(
     const amount = parseAmount(amountRaw);
     if (amount === 0) { skipped++; continue; }
 
-    // Skip internal bank transfers between own accounts
+    // Handle internal bank transfers between own accounts.
+    // Incoming transfers (amount > 0) are always skipped — they are just
+    // money moving between own accounts and should not inflate income.
+    // Outgoing transfers (amount < 0) are kept as type='transfer' so that
+    // recurring mandatory payments (e.g. loan repayment routed via an
+    // intermediate own account) are visible in the transaction history
+    // and can be detected by the recurring-payment algorithm.
     const descLower = descRaw.toLowerCase();
-    if (
+    const isInternalTransfer =
       descLower.includes('внутрибанковский перевод') &&
-      descLower.includes('между счетами')
-    ) {
-      skipped++;
-      continue;
+      descLower.includes('между счетами');
+    if (isInternalTransfer) {
+      const parsedAmount = parseAmount(amountRaw);
+      if (parsedAmount >= 0) {
+        // Incoming own-account transfer — skip entirely
+        skipped++;
+        continue;
+      }
+      // Outgoing own-account transfer — import as 'transfer' type
+      // (will be excluded from alreadySpent but visible for recurring detection)
     }
 
-    const type: 'expense' | 'income' = amount < 0 ? 'expense' : 'income';
+    // Internal outgoing transfers are kept as 'transfer' so they appear in
+    // transaction history (for recurring-payment detection) but are excluded
+    // from alreadySpent in the budget calculation.
+    const type: 'expense' | 'income' | 'transfer' = isInternalTransfer
+      ? 'transfer'
+      : amount < 0 ? 'expense' : 'income';
+
+    // Category helpers only understand 'expense' | 'income' — transfers are
+    // treated as expenses for category-lookup purposes only.
+    const categoryType: 'expense' | 'income' = type === 'income' ? 'income' : 'expense';
 
     // ── Category detection (priority order) ──────────────────────────────────
 
     // 1. MCC code from description (most reliable for card ops)
     const mcc = extractMCC(descRaw);
-    let categoryId: string | null = mcc !== null ? categoryFromMCC(mcc, type) : null;
+    let categoryId: string | null = mcc !== null ? categoryFromMCC(mcc, categoryType) : null;
     let categoryConfident = categoryId !== null;
 
     // 2. Alfa Bank text category (column 4)
     if (!categoryId) {
-      categoryId = categoryFromAlfaText(bankCategoryRaw, type);
+      categoryId = categoryFromAlfaText(bankCategoryRaw, categoryType);
       categoryConfident = categoryId !== null;
     }
 
@@ -720,7 +741,7 @@ export async function parseBankXLSX(
     if (!categoryId) {
       // Pass both cleaned desc and raw desc — raw catches patterns like "Возвраты к физику"
       // that get stripped during cleaning
-      categoryId = guessCategory(shortDesc + ' ' + descRaw, bankCategoryRaw, type);
+      categoryId = guessCategory(shortDesc + ' ' + descRaw, bankCategoryRaw, categoryType);
       categoryConfident = categoryId !== null;
     }
 
@@ -733,7 +754,7 @@ export async function parseBankXLSX(
     }
 
     // Special case: salary/payroll detection from description
-    if (!categoryId && type === 'income') {
+    if (!categoryId && categoryType === 'income') {
       if (/аванс|зарплат|оклад|начислени/i.test(shortDesc)) {
         categoryId = 'salary';
         categoryConfident = true;
@@ -743,7 +764,7 @@ export async function parseBankXLSX(
     transactions.push({
       type,
       amount: Math.abs(amount),
-      categoryId: categoryId ?? (type === 'expense' ? 'other_exp' : 'other_inc'),
+      categoryId: categoryId ?? (type === 'income' ? 'other_inc' : 'other_exp'),
       description: shortDesc,
       bankCategory: bankCategoryRaw,
       date: parseRuDate(dateStr),

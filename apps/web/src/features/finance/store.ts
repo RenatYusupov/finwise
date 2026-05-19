@@ -40,6 +40,33 @@ export interface Budget {
   period: 'month';
 }
 
+/**
+ * A recurring mandatory payment that should be reserved from the monthly budget.
+ *
+ * source:
+ *   'auto'   — detected automatically from transaction history
+ *   'manual' — added by the user
+ *
+ * dayOfMonth: expected payment day (1–31). Used to check if it's still upcoming.
+ * amountMedian: rolling median of last 3 occurrences (auto) or user-entered amount (manual).
+ * confidence: 'high' (3/3 months), 'medium' (2/3 months), 'low' (detected but uncertain).
+ * confirmedByUser: user explicitly accepted an auto-detected suggestion.
+ * dismissedByUser: user dismissed the suggestion — never show again.
+ */
+export interface RecurringPayment {
+  id: string;
+  label: string;
+  amountMedian: number;
+  dayOfMonth: number;
+  source: 'auto' | 'manual';
+  confidence: 'high' | 'medium' | 'low';
+  confirmedByUser: boolean;
+  dismissedByUser: boolean;
+  createdAt: string;
+  /** ISO date of last detected occurrence (for staleness check) */
+  lastSeenAt?: string;
+}
+
 export interface AiMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -298,6 +325,161 @@ export async function forceSyncToCloud(): Promise<string> {
   }
 }
 
+// ─── Recurring payment detection ──────────────────────────────────────────────
+//
+// Algorithm:
+//   1. Take all expense + transfer transactions from the last 6 months.
+//   2. Group by "amount bucket" (round to nearest 500 ₽) + "day bucket" (±7 days).
+//   3. A pattern qualifies if it appears in ≥ 2 distinct calendar months AND
+//      the median amount is ≥ 5,000 ₽.
+//   4. Confidence: 'high' = 4+ months, 'medium' = 3 months, 'low' = 2 months.
+//   5. Salary transactions (categoryId === 'salary') are excluded.
+//   6. Transfer transactions are included — they may be loan payments.
+//
+// The result is a list of RecurringPayment candidates. The user can then
+// confirm or dismiss each one. Only confirmed (or manual) payments are
+// used in the budget reservation calculation.
+
+function medianOf(arr: number[]): number {
+  if (arr.length === 0) return 0;
+  const s = [...arr].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 === 0 ? ((s[m - 1] ?? 0) + (s[m] ?? 0)) / 2 : (s[m] ?? 0);
+}
+
+/**
+ * Detect recurring mandatory payments from transaction history.
+ * Returns NEW candidates only — payments not already in `existing`.
+ */
+export function detectRecurringPayments(
+  transactions: Transaction[],
+  existing: RecurringPayment[],
+): RecurringPayment[] {
+  const MIN_AMOUNT = 5_000;
+  const MIN_MONTHS = 2;
+  const AMOUNT_TOLERANCE = 0.15; // ±15%
+  const DAY_TOLERANCE = 7;       // ±7 days
+
+  const now = new Date();
+  const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 6, 1).toISOString();
+
+  // Only expenses and transfers (not income, not salary)
+  const candidates = transactions.filter(
+    (t) =>
+      (t.type === 'expense' || t.type === 'transfer') &&
+      t.categoryId !== 'salary' &&
+      t.date >= sixMonthsAgo &&
+      t.amount >= MIN_AMOUNT,
+  );
+
+  if (candidates.length === 0) return [];
+
+  // Group transactions into clusters: same amount bucket + same day bucket
+  // We use a greedy approach: sort by amount, then try to merge nearby transactions
+  const sorted = [...candidates].sort((a, b) => a.amount - b.amount);
+
+  // Build clusters
+  interface Cluster {
+    txs: Transaction[];
+    months: Set<string>; // 'YYYY-MM'
+  }
+  const clusters: Cluster[] = [];
+
+  for (const tx of sorted) {
+    const txDay = new Date(tx.date).getDate();
+    const txMonth = tx.date.slice(0, 7); // 'YYYY-MM'
+
+    // Try to find an existing cluster this tx fits into
+    let matched = false;
+    for (const cluster of clusters) {
+      const clusterMedian = medianOf(cluster.txs.map((t) => t.amount));
+      const amountDiff = Math.abs(tx.amount - clusterMedian) / clusterMedian;
+      if (amountDiff > AMOUNT_TOLERANCE) continue;
+
+      // Check day proximity: compare against median day of cluster
+      const clusterDays = cluster.txs.map((t) => new Date(t.date).getDate());
+      const clusterMedianDay = Math.round(medianOf(clusterDays));
+      const dayDiff = Math.abs(txDay - clusterMedianDay);
+      // Handle month-boundary wrap (e.g., day 28 vs day 2 of next month)
+      const dayDiffWrapped = Math.min(dayDiff, 31 - dayDiff);
+      if (dayDiffWrapped > DAY_TOLERANCE) continue;
+
+      // Don't add a second tx from the same month to the same cluster
+      // (prevents double-counting two similar payments in one month)
+      if (cluster.months.has(txMonth)) continue;
+
+      cluster.txs.push(tx);
+      cluster.months.add(txMonth);
+      matched = true;
+      break;
+    }
+
+    if (!matched) {
+      clusters.push({ txs: [tx], months: new Set([txMonth]) });
+    }
+  }
+
+  // Filter clusters that qualify as recurring
+  const qualifying = clusters.filter((c) => c.months.size >= MIN_MONTHS);
+
+  // Build label from most common description words
+  function buildLabel(txs: Transaction[]): string {
+    // Use the most common description (exact match first)
+    const descCounts = new Map<string, number>();
+    for (const t of txs) {
+      const d = t.description?.trim() ?? '';
+      if (d) descCounts.set(d, (descCounts.get(d) ?? 0) + 1);
+    }
+    if (descCounts.size === 0) return 'Регулярный платёж';
+    // Return the most frequent description, truncated
+    const best = [...descCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
+    return best.length > 40 ? best.slice(0, 37) + '…' : best;
+  }
+
+  // IDs of already-known payments (to avoid re-suggesting dismissed ones)
+  const existingLabels = new Set(existing.map((p) => p.label));
+  const existingDismissed = new Set(
+    existing.filter((p) => p.dismissedByUser).map((p) => p.label),
+  );
+
+  const results: RecurringPayment[] = [];
+
+  for (const cluster of qualifying) {
+    const amounts = cluster.txs.map((t) => t.amount);
+    const days = cluster.txs.map((t) => new Date(t.date).getDate());
+    const amountMedian = Math.round(medianOf(amounts));
+    const dayOfMonth = Math.round(medianOf(days));
+    const monthCount = cluster.months.size;
+    const confidence: RecurringPayment['confidence'] =
+      monthCount >= 4 ? 'high' : monthCount >= 3 ? 'medium' : 'low';
+
+    const label = buildLabel(cluster.txs);
+
+    // Skip if already known (confirmed or dismissed)
+    if (existingLabels.has(label)) continue;
+    if (existingDismissed.has(label)) continue;
+
+    // Find the most recent occurrence date
+    const lastTx = cluster.txs.sort((a, b) => b.date.localeCompare(a.date))[0];
+
+    const entry: RecurringPayment = {
+      id: `rp_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+      label,
+      amountMedian,
+      dayOfMonth,
+      source: 'auto',
+      confidence,
+      confirmedByUser: false,
+      dismissedByUser: false,
+      createdAt: new Date().toISOString(),
+    };
+    if (lastTx?.date) entry.lastSeenAt = lastTx.date;
+    results.push(entry);
+  }
+
+  return results;
+}
+
 // ─── State ────────────────────────────────────────────────────────────────────
 
 export interface FinanceState {
@@ -305,6 +487,7 @@ export interface FinanceState {
   goals: Goal[];
   budgets: Budget[];
   aiMessages: AiMessage[];
+  recurringPayments: RecurringPayment[];
   streak: number;
   lastActiveDate: string;
 
@@ -320,6 +503,13 @@ export interface FinanceState {
   clearAllData: () => void;
   updateStreak: () => void;
 
+  // Recurring payments CRUD
+  addRecurringPayment: (p: Omit<RecurringPayment, 'id' | 'createdAt'>) => void;
+  updateRecurringPayment: (id: string, updates: Partial<RecurringPayment>) => void;
+  deleteRecurringPayment: (id: string) => void;
+  /** Run auto-detection and merge new candidates into the store (does not overwrite existing). */
+  runDetectRecurringPayments: () => void;
+
   // Computed helpers
   getMonthSummary: () => { income: number; expenses: number; savings: number; savingsRate: number };
   getRecentTransactions: (limit?: number) => Transaction[];
@@ -333,6 +523,7 @@ export const useFinanceStore = create<FinanceState>()(
       goals: [],
       budgets: [],
       aiMessages: [],
+      recurringPayments: [],
       streak: 1,
       lastActiveDate: new Date().toISOString().split('T')[0] ?? '',
 
@@ -422,9 +613,43 @@ export const useFinanceStore = create<FinanceState>()(
       clearAiChat: () => set({ aiMessages: [] }),
 
       clearAllData: () => {
-        set({ transactions: [], goals: [], budgets: [], aiMessages: [], streak: 1, lastActiveDate: '' });
+        set({ transactions: [], goals: [], budgets: [], aiMessages: [], recurringPayments: [], streak: 1, lastActiveDate: '' });
         // Also wipe cloud storage so other devices don't re-sync old data
         clearCloudStorage().catch(() => {/* ignore */});
+      },
+
+      // ── Recurring payments CRUD ──────────────────────────────────────────────
+
+      addRecurringPayment: (p) => {
+        const newPayment: RecurringPayment = {
+          ...p,
+          id: `rp_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+          createdAt: new Date().toISOString(),
+        };
+        set((s) => ({ recurringPayments: [...s.recurringPayments, newPayment] }));
+      },
+
+      updateRecurringPayment: (id, updates) => {
+        set((s) => ({
+          recurringPayments: s.recurringPayments.map((p) =>
+            p.id === id ? { ...p, ...updates } : p
+          ),
+        }));
+      },
+
+      deleteRecurringPayment: (id) => {
+        set((s) => ({
+          recurringPayments: s.recurringPayments.filter((p) => p.id !== id),
+        }));
+      },
+
+      runDetectRecurringPayments: () => {
+        const { transactions, recurringPayments } = get();
+        const newCandidates = detectRecurringPayments(transactions, recurringPayments);
+        if (newCandidates.length === 0) return;
+        set((s) => ({
+          recurringPayments: [...s.recurringPayments, ...newCandidates],
+        }));
       },
 
       updateStreak: () => {

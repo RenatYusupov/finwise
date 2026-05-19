@@ -1,29 +1,32 @@
 import { useMemo } from 'react';
 import { motion } from 'framer-motion';
 import { Link, useNavigate } from 'react-router-dom';
-import { useFinanceStore, type Transaction } from '@/features/finance/store';
+import { useFinanceStore, type Transaction, type RecurringPayment } from '@/features/finance/store';
 import { useAuthStore } from '@/features/auth/store';
 import { formatCurrency } from '@/shared/utils/format';
 
 // ─── Spending Profile ─────────────────────────────────────────────────────────
 //
-// Algorithm (ground truth = this month's actual data):
+// Algorithm v3.3 — Cash-flow salary budget with recurring payment reservation:
 //
-//   budget          = thisMonthIncome  (hard cap — can't spend what you haven't earned)
-//   fixedMonthly    = median of last 3 months fixed-category spending
-//                     (home, education + any category with ≤20% variance across 3 months)
-//   semiFixedMonthly= median of last 3 months semi-fixed spending
-//                     (food, transport, cafe, health, sport, beauty)
-//   alreadySpent    = all expenses this month so far
-//   remaining       = max(0, budget − alreadySpent)
-//   safeToday       = remaining / daysLeft
+//   budget            = computeSalaryBudget(transactions)
+//                       IQR-filtered median of monthly salary receipts
+//                       (MAIN ~5th + ADVANCE ~20th; EXTRA outliers excluded)
+//   alreadySpent      = all expense transactions this month (excludes transfers)
+//   reservedUpcoming  = sum of confirmed recurring payments not yet paid this month
+//                       (dayOfMonth > today AND no matching tx found this month)
+//   remaining         = max(0, budget − alreadySpent − reservedUpcoming)
+//   safeToday         = remaining / daysLeft
 //
 // Key design decisions:
-//   • Use THIS month's income as the budget cap (not historical avg which is
-//     inflated by one-time transfers/bonuses)
-//   • Use MEDIAN not average for historical fixed/semi-fixed (outlier-resistant)
-//   • If already overspent (alreadySpent > budget) → safeToday = 0, show warning
-//   • Show fixed + semi-fixed as informational breakdown only
+//   • Budget = IQR-median of salary PAYMENTS (cash flow), NOT thisMonthIncome.
+//   • alreadySpent excludes type === 'transfer' (own-account moves are not spending).
+//   • reservedUpcoming only counts payments confirmed by user OR added manually.
+//   • "Already paid" check: if a tx within ±15% of the recurring amount exists
+//     this month, the payment is considered settled and not reserved again.
+//   • EXTRA payments (ПЛАТ.ВЕД. with non-standard dates) excluded from budget.
+//   • IQR filter removes anomalous months (partial months, delayed batches).
+//   • Fallback chain: salaryBudget → thisMonthIncome → hist median.
 
 // Categories that are typically fixed (subscription-like)
 const FIXED_CATS = new Set(['home', 'education']);
@@ -39,11 +42,81 @@ function median(arr: number[]): number {
     : (sorted[mid] ?? 0);
 }
 
+// ─── Salary budget helpers ────────────────────────────────────────────────────
+
+/**
+ * Classify a ПЛАТ.ВЕД. payment by the day in "от DD.MM.YYYY":
+ *   day  1-10  → 'MAIN'    (основная зарплата, ~5-го числа)
+ *   day 15-25  → 'ADVANCE' (аванс, ~20-го числа)
+ *   other      → 'EXTRA'   (задолженности, разовые — исключаем из бюджета)
+ */
+function classifyPlatvedDay(description: string): 'MAIN' | 'ADVANCE' | 'EXTRA' {
+  const m = description.match(/от\s+(\d{2})\.(\d{2})\.(\d{4})/i);
+  if (!m) return 'MAIN';
+  const day = parseInt(m[1]!, 10);
+  if (day >= 1 && day <= 10) return 'MAIN';
+  if (day >= 15 && day <= 25) return 'ADVANCE';
+  return 'EXTRA';
+}
+
+/** IQR outlier filter — removes values outside [Q1 − 1.5·IQR, Q3 + 1.5·IQR]. */
+function iqrFilter(sorted: number[]): number[] {
+  if (sorted.length < 4) return sorted;
+  const q1 = sorted[Math.floor(sorted.length / 4)]!;
+  const q3 = sorted[Math.floor((3 * sorted.length) / 4)]!;
+  const iqr = q3 - q1;
+  const lo = q1 - 1.5 * iqr;
+  const hi = q3 + 1.5 * iqr;
+  const result = sorted.filter((v) => v >= lo && v <= hi);
+  return result.length > 0 ? result : sorted;
+}
+
+/**
+ * Compute monthly salary budget from transaction history.
+ *
+ * Steps:
+ *   1. Filter salary transactions (categoryId === 'salary')
+ *   2. Exclude EXTRA ПЛАТ.ВЕД. (non-standard dates = arrears/bonuses)
+ *   3. Group by calendar month of RECEIPT (cash flow basis)
+ *   4. IQR-filter anomalous months
+ *   5. Return median of filtered monthly totals
+ *
+ * Returns 0 if no salary history found (caller falls back to thisMonthIncome).
+ */
+function computeSalaryBudget(transactions: Transaction[]): number {
+  const salaryTxs = transactions.filter(
+    (t) => t.type === 'income' && t.categoryId === 'salary'
+  );
+  if (salaryTxs.length === 0) return 0;
+
+  // Exclude EXTRA ПЛАТ.ВЕД. (arrears, bonuses on non-standard dates)
+  const budgetTxs = salaryTxs.filter((t) => {
+    const isPlatved = /плат\.вед\./i.test(t.description);
+    if (!isPlatved) return true; // "Перевод начисления Зарплата/Аванс" — include
+    return classifyPlatvedDay(t.description) !== 'EXTRA';
+  });
+  if (budgetTxs.length === 0) return 0;
+
+  // Group by calendar month of receipt
+  const byMonth = new Map<string, number>();
+  for (const tx of budgetTxs) {
+    const d = new Date(tx.date);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    byMonth.set(key, (byMonth.get(key) ?? 0) + tx.amount);
+  }
+
+  const amounts = Array.from(byMonth.values()).sort((a, b) => a - b);
+  return median(iqrFilter(amounts));
+}
+
 interface SpendingProfile {
+  budget: number;
+  /** Kept as thisMonthIncome for UI compatibility — actually holds the salary budget */
   thisMonthIncome: number;
   fixedMonthly: number;
   semiFixedMonthly: number;
   alreadySpent: number;
+  reservedUpcoming: number;
   remaining: number;
   safeToday: number;
   safeRestOfMonth: number;
@@ -53,7 +126,10 @@ interface SpendingProfile {
   hasEnoughHistory: boolean;
 }
 
-function computeSpendingProfile(transactions: Transaction[]): SpendingProfile {
+function computeSpendingProfile(
+  transactions: Transaction[],
+  recurringPayments: RecurringPayment[],
+): SpendingProfile {
   const now = new Date();
   const dayOfMonth = now.getDate();
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
@@ -62,11 +138,13 @@ function computeSpendingProfile(transactions: Transaction[]): SpendingProfile {
   // Current month boundaries
   const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
 
-  // This month's actual income (hard budget cap)
+  // This month's transactions
   const thisMonthTxs = transactions.filter((t) => t.date >= thisMonthStart);
   const thisMonthIncome = thisMonthTxs
     .filter((t) => t.type === 'income')
     .reduce((s, t) => s + t.amount, 0);
+
+  // alreadySpent: only real expenses — exclude transfers (own-account moves)
   const alreadySpent = thisMonthTxs
     .filter((t) => t.type === 'expense')
     .reduce((s, t) => s + t.amount, 0);
@@ -119,9 +197,11 @@ function computeSpendingProfile(transactions: Transaction[]): SpendingProfile {
     }
   });
 
-  // Budget = this month's actual income (hard cap)
-  // If income is 0 (not yet received), fall back to median of last 3 months income
-  let budget = thisMonthIncome;
+  // Budget = IQR-filtered median of monthly salary receipts (cash-flow basis).
+  // Salary arrives irregularly — thisMonthIncome gives wildly wrong results.
+  // Fallback chain: salaryBudget → thisMonthIncome → hist median
+  let budget = computeSalaryBudget(transactions);
+  if (budget === 0) budget = thisMonthIncome;
   if (budget === 0 && hasHistory) {
     const histIncome = histMonths.map(({ start, end }) =>
       transactions
@@ -131,11 +211,32 @@ function computeSpendingProfile(transactions: Transaction[]): SpendingProfile {
     budget = median(histIncome.filter((v) => v > 0));
   }
 
-  const remaining = Math.max(0, budget - alreadySpent);
+  // ── Recurring payment reservation ─────────────────────────────────────────
+  // Only count payments that are:
+  //   1. Confirmed by user OR manually added
+  //   2. Not dismissed
+  //   3. Expected later this month (dayOfMonth > today)
+  //   4. Not already paid this month (no matching expense within ±15%)
+  const AMOUNT_TOLERANCE = 0.15;
+  const reservedUpcoming = recurringPayments
+    .filter((p) => (p.confirmedByUser || p.source === 'manual') && !p.dismissedByUser)
+    .filter((p) => p.dayOfMonth > dayOfMonth)
+    .filter((p) => {
+      // Check if already paid this month
+      const alreadyPaid = thisMonthTxs.some(
+        (t) =>
+          t.type === 'expense' &&
+          Math.abs(t.amount - p.amountMedian) / p.amountMedian <= AMOUNT_TOLERANCE,
+      );
+      return !alreadyPaid;
+    })
+    .reduce((sum, p) => sum + p.amountMedian, 0);
+
+  const remaining = Math.max(0, budget - alreadySpent - reservedUpcoming);
   const safeRestOfMonth = remaining;
   const safeToday = remaining > 0 ? remaining / daysLeft : 0;
 
-  const isOverspent = alreadySpent > budget && budget > 0;
+  const isOverspent = alreadySpent + reservedUpcoming > budget && budget > 0;
 
   // On track = daily spend rate ≤ budget/day
   const dailyBudget = budget / daysInMonth;
@@ -143,10 +244,12 @@ function computeSpendingProfile(transactions: Transaction[]): SpendingProfile {
   const isOnTrack = dailySpendRate <= dailyBudget * 1.1;
 
   return {
-    thisMonthIncome: budget,
+    budget,
+    thisMonthIncome: budget, // UI compat alias
     fixedMonthly,
     semiFixedMonthly,
     alreadySpent,
+    reservedUpcoming,
     remaining,
     safeToday,
     safeRestOfMonth,
@@ -159,8 +262,19 @@ function computeSpendingProfile(transactions: Transaction[]): SpendingProfile {
 
 // ─── Smart Safe-to-Spend Card ─────────────────────────────────────────────────
 
-function SafeToSpendCard({ transactions, income }: { transactions: Transaction[]; income: number }) {
-  const profile = useMemo(() => computeSpendingProfile(transactions), [transactions]);
+function SafeToSpendCard({
+  transactions,
+  recurringPayments,
+  income,
+}: {
+  transactions: Transaction[];
+  recurringPayments: RecurringPayment[];
+  income: number;
+}) {
+  const profile = useMemo(
+    () => computeSpendingProfile(transactions, recurringPayments),
+    [transactions, recurringPayments],
+  );
 
   // Fallback to simple formula if not enough history
   if (!profile.hasEnoughHistory) {
@@ -239,19 +353,28 @@ function SafeToSpendCard({ transactions, income }: { transactions: Transaction[]
         </div>
       </div>
 
-      {/* Breakdown row: income / fixed / semi-fixed */}
+      {/* Breakdown row: budget / spent / reserved */}
       <div className="flex gap-px bg-white/10 border-t border-white/10">
         <div className="flex-1 px-3 py-2 text-center">
-          <div className="text-purple-300 text-xs mb-0.5">Доход</div>
-          <div className="text-white text-xs font-semibold">{formatCurrency(profile.thisMonthIncome)}</div>
+          <div className="text-purple-300 text-xs mb-0.5">Бюджет</div>
+          <div className="text-white text-xs font-semibold">{formatCurrency(profile.budget)}</div>
         </div>
         <div className="flex-1 px-3 py-2 text-center border-l border-white/10">
-          <div className="text-purple-300 text-xs mb-0.5">Постоянные</div>
-          <div className="text-white text-xs font-semibold">{formatCurrency(profile.fixedMonthly)}</div>
+          <div className="text-purple-300 text-xs mb-0.5">Потрачено</div>
+          <div className="text-white text-xs font-semibold">{formatCurrency(profile.alreadySpent)}</div>
         </div>
         <div className="flex-1 px-3 py-2 text-center border-l border-white/10">
-          <div className="text-purple-300 text-xs mb-0.5">Условно-пост.</div>
-          <div className="text-white text-xs font-semibold">{formatCurrency(profile.semiFixedMonthly)}</div>
+          <div className="text-purple-300 text-xs mb-0.5">
+            {profile.reservedUpcoming > 0 ? '🔒 Зарезерв.' : 'Свободно'}
+          </div>
+          <div
+            className="text-xs font-semibold"
+            style={{ color: profile.reservedUpcoming > 0 ? '#FDE68A' : 'white' }}
+          >
+            {profile.reservedUpcoming > 0
+              ? formatCurrency(profile.reservedUpcoming)
+              : formatCurrency(profile.remaining)}
+          </div>
         </div>
       </div>
     </motion.div>
@@ -298,7 +421,14 @@ function AiInsightBanner({ expenses, income, navigate }: { expenses: number; inc
 
 export function DashboardPage() {
   const { user } = useAuthStore();
-  const { getMonthSummary, getRecentTransactions, goals, streak, transactions } = useFinanceStore();
+  const {
+    getMonthSummary,
+    getRecentTransactions,
+    goals,
+    streak,
+    transactions,
+    recurringPayments,
+  } = useFinanceStore();
   const navigate = useNavigate();
 
   const summary = getMonthSummary();
@@ -380,7 +510,11 @@ export function DashboardPage() {
       </motion.div>
 
       {/* Smart safe to spend */}
-      <SafeToSpendCard transactions={transactions} income={summary.income} />
+      <SafeToSpendCard
+        transactions={transactions}
+        recurringPayments={recurringPayments}
+        income={summary.income}
+      />
 
       {/* AI Insight banner */}
       <AiInsightBanner expenses={summary.expenses} income={summary.income} navigate={navigate} />

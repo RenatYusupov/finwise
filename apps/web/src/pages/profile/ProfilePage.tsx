@@ -7,6 +7,7 @@ import { useUIStore } from '@/features/ui/store';
 import { formatCurrency } from '@/shared/utils/format';
 import { parseBankXLSX, parseTbankPDF, parseCSV, rowToTransactionGeneric } from './bankImport';
 import type { ParsedBankTx } from './bankImport';
+import { PostImportWizard } from './PostImportWizard';
 
 // ─── Groq Categorization ──────────────────────────────────────────────────────
 
@@ -190,57 +191,34 @@ type ImportResult = {
 //      Coverage = (total expense amount - other_exp amount) / total expense amount
 //   4. Hard cap at MAX_CLARIFY questions to avoid fatigue.
 
-const MAX_CLARIFY = 10;
-const MIN_CLARIFY_AMOUNT = 5000;
+const MAX_CLARIFY = 15;
+const MIN_CLARIFY_AMOUNT = 1000;
 
 /**
  * Given newly imported transactions, compute which ones to ask about.
- * Goal: reach ≥ 90% category coverage of this month's expenses by amount.
- * Only asks about other_exp/other_inc with amount ≥ MIN_CLARIFY_AMOUNT.
+ *
+ * Strategy: show ALL newly imported other_exp / other_inc transactions
+ * with amount ≥ MIN_CLARIFY_AMOUNT, sorted by amount descending, capped
+ * at MAX_CLARIFY to avoid fatigue.
+ *
+ * We no longer use the greedy 90%-coverage heuristic here — that caused
+ * only 1 question to be shown when a single large transaction covered the
+ * gap. The wizard is a full onboarding flow, so we want to clarify as many
+ * uncategorized transactions as reasonably possible.
  */
 function computeClarifyQueue(
   newTxs: import('@/features/finance/store').Transaction[],
-  allTxs: import('@/features/finance/store').Transaction[],
+  _allTxs: import('@/features/finance/store').Transaction[],
 ): string[] {
-  const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-
-  // All expense transactions this month (including newly imported)
-  const monthExpenses = allTxs.filter((t) => t.type === 'expense' && t.date >= monthStart);
-  const totalExpenseAmount = monthExpenses.reduce((s, t) => s + t.amount, 0);
-  if (totalExpenseAmount === 0) return [];
-
-  // Amount currently in other_exp this month
-  const otherExpAmount = monthExpenses
-    .filter((t) => t.categoryId === 'other_exp')
-    .reduce((s, t) => s + t.amount, 0);
-
-  // Current coverage = (total - other_exp) / total
-  const currentCoverage = (totalExpenseAmount - otherExpAmount) / totalExpenseAmount;
-  if (currentCoverage >= 0.9) return []; // already ≥ 90% — nothing to ask
-
-  // How much other_exp amount we need to reclassify to reach 90%
-  // coverage = (total - remaining_other) / total >= 0.9
-  // → remaining_other <= total * 0.1
-  const targetOtherMax = totalExpenseAmount * 0.1;
-  const needToReclassify = otherExpAmount - targetOtherMax;
-  if (needToReclassify <= 0) return [];
-
-  // Candidates: newly imported other_exp/other_inc with amount ≥ threshold, sorted desc
-  const candidates = newTxs
-    .filter((t) => (t.categoryId === 'other_exp' || t.categoryId === 'other_inc') && t.amount >= MIN_CLARIFY_AMOUNT)
-    .sort((a, b) => b.amount - a.amount);
-
-  // Pick the minimum set of candidates (greedy by largest first) to cover the gap
-  const toAsk: string[] = [];
-  let reclassified = 0;
-  for (const tx of candidates) {
-    if (reclassified >= needToReclassify) break;
-    if (toAsk.length >= MAX_CLARIFY) break;
-    toAsk.push(tx.id);
-    reclassified += tx.amount;
-  }
-  return toAsk;
+  return newTxs
+    .filter(
+      (t) =>
+        (t.categoryId === 'other_exp' || t.categoryId === 'other_inc') &&
+        t.amount >= MIN_CLARIFY_AMOUNT,
+    )
+    .sort((a, b) => b.amount - a.amount)
+    .slice(0, MAX_CLARIFY)
+    .map((t) => t.id);
 }
 
 const CLARIFY_EXPENSE_CATS = [
@@ -403,8 +381,8 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
   const [dragOver, setDragOver] = useState(false);
   /** IDs of imported transactions that need category clarification */
   const [clarifyIds, setClarifyIds] = useState<string[]>([]);
-  /** Whether we're in the clarification step (after result screen) */
-  const [clarifying, setClarifying] = useState(false);
+  /** Whether we're in the post-import wizard (after result screen) */
+  const [wizarding, setWizarding] = useState(false);
 
   useEffect(() => {
     openModal();
@@ -698,17 +676,17 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
             </div>
           )}
 
-          {/* Category clarification step — shown after result when there are unknowns */}
-          {clarifying && clarifyIds.length > 0 && (
-            <ClarifyCategoryStep
-              txIds={clarifyIds}
+          {/* Post-import wizard — shown after result screen */}
+          {wizarding && (
+            <PostImportWizard
+              clarifyIds={clarifyIds}
               onDone={onClose}
             />
           )}
         </div>
 
         {/* Fixed footer — always visible, never scrolls away */}
-        {result && !clarifying && (
+        {result && !wizarding && (
           <div
             className="flex-shrink-0 px-6 pt-3 border-t border-gray-100"
             style={{ paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' }}
@@ -724,17 +702,11 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
               </motion.button>
               <motion.button
                 whileTap={{ scale: 0.97 }}
-                onClick={() => {
-                  if (clarifyIds.length > 0) {
-                    setClarifying(true);
-                  } else {
-                    onClose();
-                  }
-                }}
+                onClick={() => setWizarding(true)}
                 className="flex-1 py-3 text-white rounded-2xl font-bold text-sm haptic"
                 style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}
               >
-                {clarifyIds.length > 0 ? `Уточнить ${clarifyIds.length} →` : 'Готово →'}
+                {clarifyIds.length > 0 ? `Настроить (${clarifyIds.length} вопросов) →` : 'Настроить бюджет →'}
               </motion.button>
             </div>
           </div>
