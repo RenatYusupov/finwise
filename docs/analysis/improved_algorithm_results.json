@@ -1,0 +1,89 @@
+{
+  "2026-05-14": {
+    "budget": 36818.0,
+    "monthly_incomes_raw": [
+      156349.0,
+      6330.4,
+      36818.0,
+      229320.1,
+      299.0
+    ],
+    "monthly_incomes_filtered": [
+      156349.0,
+      6330.4,
+      36818.0,
+      229320.1,
+      299.0
+    ],
+    "this_month_income": 703511.48,
+    "already_spent": 2908.66,
+    "fixed_monthly": 0,
+    "fixed_expenses_breakdown": {},
+    "remaining": 33909.34,
+    "safe_today": 1994.6670588235293,
+    "safe_rest_of_month": 33909.34,
+    "days_left": 17,
+    "day_of_week": "Thursday",
+    "day_multiplier": 1.0,
+    "is_overspent": false,
+    "overspent_amount": 0
+  },
+  "2026-04-15": {
+    "budget": 36818.0,
+    "monthly_incomes_raw": [
+      156349.0,
+      6330.4,
+      36818.0,
+      229320.1,
+      299.0
+    ],
+    "monthly_incomes_filtered": [
+      156349.0,
+      6330.4,
+      36818.0,
+      229320.1,
+      299.0
+    ],
+    "this_month_income": 0.0,
+    "already_spent": 49250.0,
+    "fixed_monthly": 0,
+    "fixed_expenses_breakdown": {},
+    "remaining": 0,
+    "safe_today": 0,
+    "safe_rest_of_month": 0,
+    "days_left": 15,
+    "day_of_week": "Wednesday",
+    "day_multiplier": 0.9,
+    "is_overspent": true,
+    "overspent_amount": 12432.0
+  },
+  "2026-01-20": {
+    "budget": 36818.0,
+    "monthly_incomes_raw": [
+      156349.0,
+      6330.4,
+      36818.0,
+      229320.1,
+      299.0
+    ],
+    "monthly_incomes_filtered": [
+      156349.0,
+      6330.4,
+      36818.0,
+      229320.1,
+      299.0
+    ],
+    "this_month_income": 40581.5,
+    "already_spent": 229754.97,
+    "fixed_monthly": 0,
+    "fixed_expenses_breakdown": {},
+    "remaining": 0,
+    "safe_today": 0,
+    "safe_rest_of_month": 0,
+    "days_left": 11,
+    "day_of_week": "Tuesday",
+    "day_multiplier": 1.15,
+    "is_overspent": true,
+    "overspent_amount": 192936.97
+  }
+}

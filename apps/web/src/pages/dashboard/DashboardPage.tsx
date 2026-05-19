@@ -7,7 +7,7 @@ import { formatCurrency } from '@/shared/utils/format';
 
 // ─── Spending Profile ─────────────────────────────────────────────────────────
 //
-// Algorithm v3.3 — Cash-flow salary budget with recurring payment reservation:
+// Algorithm v4 — Cash-flow salary budget with recurring payment reservation:
 //
 //   budget            = computeSalaryBudget(transactions)
 //                       IQR-filtered median of monthly salary receipts
@@ -15,8 +15,12 @@ import { formatCurrency } from '@/shared/utils/format';
 //   alreadySpent      = all expense transactions this month (excludes transfers)
 //   reservedUpcoming  = sum of confirmed recurring payments not yet paid this month
 //                       (dayOfMonth > today AND no matching tx found this month)
-//   remaining         = max(0, budget − alreadySpent − reservedUpcoming)
-//   safeToday         = remaining / daysLeft
+//   remaining         = budget − alreadySpent − reservedUpcoming  (can be negative)
+//   daysLeft          = daysInMonth − dayOfMonth + 1  (includes today)
+//   daysAhead         = max(1, daysLeft − 1)          (days after today for safePerDay)
+//   spentToday        = sum of expense transactions dated today
+//   safePerDay        = remaining / daysAhead
+//   safeToday         = safePerDay − spentToday        (can be negative)
 //
 // Key design decisions:
 //   • Budget = IQR-median of salary PAYMENTS (cash flow), NOT thisMonthIncome.
@@ -27,6 +31,8 @@ import { formatCurrency } from '@/shared/utils/format';
 //   • EXTRA payments (ПЛАТ.ВЕД. with non-standard dates) excluded from budget.
 //   • IQR filter removes anomalous months (partial months, delayed batches).
 //   • Fallback chain: salaryBudget → thisMonthIncome → hist median.
+//   • remaining is NOT clamped to 0 — negative value = overspend, shown in UI.
+//   • safeToday subtracts spentToday so the card updates as user adds transactions.
 
 // Categories that are typically fixed (subscription-like)
 const FIXED_CATS = new Set(['home', 'education']);
@@ -117,11 +123,19 @@ interface SpendingProfile {
   semiFixedMonthly: number;
   alreadySpent: number;
   reservedUpcoming: number;
+  /** Can be negative — negative means overspent. NOT clamped to 0. */
   remaining: number;
+  /** Amount spent today (expense transactions dated today). */
+  spentToday: number;
+  /** Daily safe-to-spend budget = remaining / daysAhead. Can be negative. */
+  safePerDay: number;
+  /** safePerDay − spentToday. Updates as user adds transactions today. */
   safeToday: number;
   safeRestOfMonth: number;
   daysLeft: number;
   isOverspent: boolean;
+  /** Math.abs(remaining) when remaining < 0, else 0. */
+  overspentAmount: number;
   isOnTrack: boolean;
   hasEnoughHistory: boolean;
 }
@@ -133,7 +147,11 @@ function computeSpendingProfile(
   const now = new Date();
   const dayOfMonth = now.getDate();
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  const daysLeft = Math.max(1, daysInMonth - dayOfMonth);
+  // FIX-1a: daysLeft includes today (was: daysInMonth - dayOfMonth, excluded today)
+  const daysLeft = daysInMonth - dayOfMonth + 1;
+  // daysAhead = days remaining AFTER today — used for safePerDay so today's
+  // already-spent amount is subtracted separately via spentToday.
+  const daysAhead = Math.max(1, daysLeft - 1);
 
   // Current month boundaries
   const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
@@ -232,11 +250,30 @@ function computeSpendingProfile(
     })
     .reduce((sum, p) => sum + p.amountMedian, 0);
 
-  const remaining = Math.max(0, budget - alreadySpent - reservedUpcoming);
+  // FIX-1b: Do NOT clamp to 0 — negative remaining = overspent, must be visible in UI.
+  const remaining = budget - alreadySpent - reservedUpcoming;
   const safeRestOfMonth = remaining;
-  const safeToday = remaining > 0 ? remaining / daysLeft : 0;
 
-  const isOverspent = alreadySpent + reservedUpcoming > budget && budget > 0;
+  // FIX-1c: Compute spentToday so safeToday updates as user adds transactions.
+  const spentToday = thisMonthTxs
+    .filter((t) => {
+      const d = new Date(t.date);
+      return (
+        t.type === 'expense' &&
+        d.getFullYear() === now.getFullYear() &&
+        d.getMonth() === now.getMonth() &&
+        d.getDate() === now.getDate()
+      );
+    })
+    .reduce((s, t) => s + t.amount, 0);
+
+  // safePerDay = how much per remaining day (after today) is available.
+  // safeToday  = safePerDay minus what's already spent today.
+  const safePerDay = remaining / daysAhead;
+  const safeToday = safePerDay - spentToday;
+
+  const isOverspent = remaining < 0 && budget > 0;
+  const overspentAmount = isOverspent ? Math.abs(remaining) : 0;
 
   // On track = daily spend rate ≤ budget/day
   const dailyBudget = budget / daysInMonth;
@@ -251,10 +288,13 @@ function computeSpendingProfile(
     alreadySpent,
     reservedUpcoming,
     remaining,
+    spentToday,
+    safePerDay,
     safeToday,
     safeRestOfMonth,
     daysLeft,
     isOverspent,
+    overspentAmount,
     isOnTrack,
     hasEnoughHistory: budget > 0,
   };
@@ -346,7 +386,7 @@ function SafeToSpendCard({
           </div>
           <div className="text-white font-bold text-lg">
             {profile.isOverspent
-              ? formatCurrency(profile.alreadySpent - profile.thisMonthIncome)
+              ? formatCurrency(profile.overspentAmount)
               : formatCurrency(profile.safeRestOfMonth)}
           </div>
           <div className="text-purple-200 text-xs">{profile.daysLeft} дн.</div>

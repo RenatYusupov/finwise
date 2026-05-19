@@ -19,6 +19,11 @@ export interface Transaction {
   category?: Category;
   description: string;
   date: string; // ISO
+  /**
+   * true = user manually corrected the category after auto-classification.
+   * When set, the category must NOT be overwritten by re-import or AI re-categorisation.
+   */
+  userCorrected?: boolean;
 }
 
 export interface Goal {
@@ -125,6 +130,10 @@ interface CloudPayload {
   v: number;
   transactions: Transaction[];
   goals: Goal[];
+  /** Budget limits per category — persisted so device-switch doesn't lose them */
+  budgets: Budget[];
+  /** Recurring payment patterns — persisted so device-switch doesn't lose them */
+  recurringPayments: RecurringPayment[];
   streak: number;
   lastActiveDate: string;
 }
@@ -221,6 +230,8 @@ function buildCloudPayload(state: FinanceState): CloudPayload {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     transactions: (state.transactions ?? []).map(({ category: _cat, ...tx }) => tx),
     goals: state.goals ?? [],
+    budgets: state.budgets ?? [],
+    recurringPayments: (state.recurringPayments ?? []).map((p) => p),
     streak: state.streak ?? 1,
     lastActiveDate: state.lastActiveDate ?? '',
   };
@@ -247,10 +258,14 @@ export function cancelScheduledUpload(): void {
   }
 }
 
-/** Merge two cloud payloads: union of transactions/goals, keep higher streak */
+/** Merge two cloud payloads: union of transactions/goals/budgets/recurringPayments, keep higher streak */
 function mergePayloads(a: CloudPayload, b: CloudPayload): CloudPayload {
   const txMap = new Map<string, Transaction>();
-  [...(a.transactions ?? []), ...(b.transactions ?? [])].forEach((t) => txMap.set(t.id, t));
+  // Prefer the version with userCorrected=true when merging the same transaction
+  [...(a.transactions ?? []), ...(b.transactions ?? [])].forEach((t) => {
+    const existing = txMap.get(t.id);
+    if (!existing || t.userCorrected) txMap.set(t.id, t);
+  });
   const transactions = Array.from(txMap.values()).sort(
     (x, y) => new Date(y.date).getTime() - new Date(x.date).getTime()
   );
@@ -259,11 +274,34 @@ function mergePayloads(a: CloudPayload, b: CloudPayload): CloudPayload {
   [...(a.goals ?? []), ...(b.goals ?? [])].forEach((g) => goalMap.set(g.id, g));
   const goals = Array.from(goalMap.values());
 
+  // Budgets: prefer the entry with higher limit (most recent user intent)
+  const budgetMap = new Map<string, Budget>();
+  [...(a.budgets ?? []), ...(b.budgets ?? [])].forEach((bgt) => {
+    const existing = budgetMap.get(bgt.id);
+    if (!existing || bgt.limit > existing.limit) budgetMap.set(bgt.id, bgt);
+  });
+  const budgets = Array.from(budgetMap.values());
+
+  // RecurringPayments: prefer confirmed/manual over auto; keep dismissed flags
+  const rpMap = new Map<string, RecurringPayment>();
+  [...(a.recurringPayments ?? []), ...(b.recurringPayments ?? [])].forEach((rp) => {
+    const existing = rpMap.get(rp.id);
+    if (!existing) { rpMap.set(rp.id, rp); return; }
+    // Merge: keep dismissedByUser=true if either side has it; prefer confirmedByUser=true
+    rpMap.set(rp.id, {
+      ...existing,
+      ...rp,
+      dismissedByUser: existing.dismissedByUser || rp.dismissedByUser,
+      confirmedByUser: existing.confirmedByUser || rp.confirmedByUser,
+    });
+  });
+  const recurringPayments = Array.from(rpMap.values());
+
   const streak = Math.max(a.streak ?? 1, b.streak ?? 1);
   const lastActiveDate = (a.lastActiveDate ?? '') > (b.lastActiveDate ?? '')
     ? a.lastActiveDate : b.lastActiveDate;
 
-  return { v: CLOUD_VERSION, transactions, goals, streak, lastActiveDate };
+  return { v: CLOUD_VERSION, transactions, goals, budgets, recurringPayments, streak, lastActiveDate };
 }
 
 /** Custom Zustand persist storage: localStorage only (fast path).
@@ -351,11 +389,39 @@ function medianOf(arr: number[]): number {
  * Detect recurring mandatory payments from transaction history.
  * Returns NEW candidates only — payments not already in `existing`.
  */
+/**
+ * Deactivate recurring payment patterns that haven't been seen in 2+ months.
+ * Returns updated list with stale auto-detected entries marked as dismissed.
+ * Manual entries are never auto-dismissed.
+ *
+ * Staleness rule (ALG-001 Change 4):
+ *   - If lastSeenAt is more than 65 days ago → mark dismissedByUser = true
+ *     (65 days = ~2 months, gives buffer for irregular billing cycles)
+ *   - Only applies to source='auto' entries not yet confirmed by user
+ */
+export function updateStaleness(payments: RecurringPayment[]): RecurringPayment[] {
+  const now = new Date();
+  const STALE_DAYS = 65;
+  return payments.map((p) => {
+    if (p.source === 'manual' || p.confirmedByUser || p.dismissedByUser) return p;
+    if (!p.lastSeenAt) return p;
+    const lastSeen = new Date(p.lastSeenAt);
+    const daysSince = (now.getTime() - lastSeen.getTime()) / (1000 * 60 * 60 * 24);
+    if (daysSince > STALE_DAYS) {
+      return { ...p, dismissedByUser: true };
+    }
+    return p;
+  });
+}
+
 export function detectRecurringPayments(
   transactions: Transaction[],
   existing: RecurringPayment[],
 ): RecurringPayment[] {
-  const MIN_AMOUNT = 5_000;
+  // FIX-2: Two-level threshold — subscriptions (Netflix 799₽) vs payments (rent 30,000₽)
+  const MIN_AMOUNT_SUBSCRIPTIONS = 100;   // catches Netflix 799₽, Yandex Plus 299₽
+  const MIN_AMOUNT_PAYMENTS = 1_000;      // general recurring payments
+  const MIN_AMOUNT = MIN_AMOUNT_SUBSCRIPTIONS; // effective lower bound
   const MIN_MONTHS = 2;
   const AMOUNT_TOLERANCE = 0.15; // ±15%
   const DAY_TOLERANCE = 7;       // ±7 days
@@ -645,10 +711,14 @@ export const useFinanceStore = create<FinanceState>()(
 
       runDetectRecurringPayments: () => {
         const { transactions, recurringPayments } = get();
-        const newCandidates = detectRecurringPayments(transactions, recurringPayments);
-        if (newCandidates.length === 0) return;
+        // FIX-3: Run staleness check first — deactivate patterns not seen in 65+ days
+        const freshPayments = updateStaleness(recurringPayments);
+        const newCandidates = detectRecurringPayments(transactions, freshPayments);
         set((s) => ({
-          recurringPayments: [...s.recurringPayments, ...newCandidates],
+          recurringPayments: [
+            ...updateStaleness(s.recurringPayments),
+            ...newCandidates,
+          ],
         }));
       },
 
@@ -771,6 +841,8 @@ export async function rehydrateFromCloud(storeName = 'finwise-finance'): Promise
     useFinanceStore.setState({
       transactions: transactionsWithCats,
       goals: merged.goals,
+      budgets: merged.budgets ?? [],
+      recurringPayments: merged.recurringPayments ?? [],
       streak: merged.streak,
       lastActiveDate: merged.lastActiveDate,
     });
@@ -792,6 +864,8 @@ export async function rehydrateFromCloud(storeName = 'finwise-finance'): Promise
         ...localStoreValue.state,
         transactions: transactionsWithCats,
         goals: merged.goals,
+        budgets: merged.budgets ?? [],
+        recurringPayments: merged.recurringPayments ?? [],
         streak: merged.streak,
         lastActiveDate: merged.lastActiveDate,
       };
@@ -800,8 +874,12 @@ export async function rehydrateFromCloud(storeName = 'finwise-finance'): Promise
 
     // If merged has MORE data than what was in cloud (local had extra transactions),
     // write the merged result back to cloud so other devices get the full union.
-    if (merged.transactions.length > cloudPayload.transactions.length ||
-        merged.goals.length > cloudPayload.goals.length) {
+    if (
+      merged.transactions.length > cloudPayload.transactions.length ||
+      merged.goals.length > cloudPayload.goals.length ||
+      (merged.budgets ?? []).length > (cloudPayload.budgets ?? []).length ||
+      (merged.recurringPayments ?? []).length > (cloudPayload.recurringPayments ?? []).length
+    ) {
       cloudSet(JSON.stringify(merged)).catch(() => {/* ignore */});
     }
   } catch { /* ignore */ } finally {

@@ -406,6 +406,66 @@ export function guessCategory(description: string, bankCategory: string, type: '
   return null;
 }
 
+// ─── P2P transfer detection ───────────────────────────────────────────────────
+//
+// ALG-004 Rule 1: SBP transfers to phone numbers and named individuals are
+// reclassified from type='transfer' (excluded from spending) to type='expense'
+// (counted in alreadySpent). This fixes the 554,000 ₽ undercount identified
+// in the analyst report.
+//
+// Detection strategy (layered):
+//   1. Phone number pattern: +7XXXXXXXXXX in description → always P2P
+//   2. SBP keyword patterns: "Перевод по номеру телефона", "СБП → Имя Фамилия"
+//   3. Named individual patterns: "Перевод клиенту Имя Фамилия" (Cyrillic name)
+//
+// Cash withdrawal detection:
+//   ATM withdrawals are reclassified as expense (categoryId='other_exp') and
+//   flagged requiresUserInput=true so PostImportWizard can ask the user what
+//   the cash was spent on.
+
+const P2P_PATTERNS: RegExp[] = [
+  // Phone number — most reliable signal
+  /\+7\d{10}\b/,
+  // SBP explicit patterns
+  /перевод по номеру телефона/i,
+  /система быстрых платежей.*(?:на|от)\s+[А-ЯЁ][а-яё]+/i,
+  /СБП\s*[→>]\s*[А-ЯЁ][а-яё]+/i,
+  // Named individual transfer (Cyrillic first+last name after "клиенту" or "от клиента")
+  /перевод(?:\s+клиенту|\s+от\s+клиента)?\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+/i,
+  // T-Bank "Перевод по телефону" (after cleanTbankDesc normalisation)
+  /перевод по телефону/i,
+  // Alfa Bank SBP outgoing to individual
+  /исходящий перевод.*физическому лицу/i,
+  /перевод физическому лицу/i,
+];
+
+const CASH_WITHDRAWAL_PATTERNS: RegExp[] = [
+  /снятие наличных/i,
+  /выдача наличных/i,
+  /банкомат/i,
+  /atm\b/i,
+  /cash\s*withdrawal/i,
+  /наличные/i,
+];
+
+/**
+ * Returns true if the description indicates a P2P transfer to an individual.
+ * Used to reclassify type='transfer' → type='expense' (ALG-004 Rule 1).
+ */
+export function isP2PTransfer(description: string, rawDescription?: string): boolean {
+  const text = description + (rawDescription ? ' ' + rawDescription : '');
+  return P2P_PATTERNS.some((p) => p.test(text));
+}
+
+/**
+ * Returns true if the description indicates an ATM cash withdrawal.
+ * Used to reclassify and flag for PostImportWizard (ALG-004 Rule 2).
+ */
+export function isCashWithdrawal(description: string, rawDescription?: string): boolean {
+  const text = description + (rawDescription ? ' ' + rawDescription : '');
+  return CASH_WITHDRAWAL_PATTERNS.some((p) => p.test(text));
+}
+
 // ─── Shared types ─────────────────────────────────────────────────────────────
 
 export interface ParsedBankTx {
@@ -418,6 +478,11 @@ export interface ParsedBankTx {
   date: string;
   /** true = MCC/keyword-matched, no need to send to Groq */
   categoryConfident?: boolean;
+  /**
+   * true = transaction requires user clarification in PostImportWizard.
+   * Set for: P2P transfers (what was it for?) and cash withdrawals (which category?).
+   */
+  requiresUserInput?: boolean;
 }
 
 // ─── PDF.js loader ────────────────────────────────────────────────────────────
@@ -526,18 +591,23 @@ export async function parseTbankPDF(
         continue;
       }
 
-      const type: 'expense' | 'income' = amount < 0 ? 'expense' : 'income';
-      const bankCategory = type === 'expense' ? 'Расход' : 'Доход';
-      const guessed = guessCategory(descClean, bankCategory, type);
+      const baseType: 'expense' | 'income' = amount < 0 ? 'expense' : 'income';
+      const bankCategory = baseType === 'expense' ? 'Расход' : 'Доход';
+      const guessed = guessCategory(descClean, bankCategory, baseType);
+
+      // ALG-004: Detect P2P transfers and cash withdrawals for expense reclassification
+      const p2p = baseType === 'expense' && isP2PTransfer(descClean, descRaw);
+      const cash = baseType === 'expense' && isCashWithdrawal(descClean, descRaw);
 
       transactions.push({
-        type,
+        type: baseType,
         amount: Math.abs(amount),
-        categoryId: guessed ?? (type === 'expense' ? 'other_exp' : 'other_inc'),
+        categoryId: guessed ?? (baseType === 'expense' ? 'other_exp' : 'other_inc'),
         description: descClean,
         bankCategory,
         date: parseRuDate(dateStr),
         categoryConfident: guessed !== null,
+        requiresUserInput: p2p || cash,
       });
     }
   }
@@ -761,6 +831,12 @@ export async function parseBankXLSX(
       }
     }
 
+    // ALG-004: P2P transfers to individuals must be counted as expenses.
+    // Internal own-account transfers remain 'transfer' (excluded from spending).
+    // Detection runs here — after shortDesc is built — so patterns match cleaned text.
+    const isP2P = !isInternalTransfer && amount < 0 && isP2PTransfer(shortDesc, descRaw);
+    const isCash = !isInternalTransfer && amount < 0 && isCashWithdrawal(shortDesc, descRaw);
+
     transactions.push({
       type,
       amount: Math.abs(amount),
@@ -769,6 +845,8 @@ export async function parseBankXLSX(
       bankCategory: bankCategoryRaw,
       date: parseRuDate(dateStr),
       categoryConfident,
+      // ALG-004: flag P2P and cash for PostImportWizard clarification
+      requiresUserInput: isP2P || isCash,
     });
   }
 
