@@ -303,13 +303,15 @@ model FinTransaction {
 }
 
 model FinBudget {
-  id         String   @id @default(cuid())
-  telegramId BigInt
-  category   String
-  limit      Float
-  period     String   @default("month")
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id               String   @id @default(cuid())
+  telegramId       BigInt
+  category         String
+  limit            Float
+  period           String   @default("month")
+  notified80Month  String?
+  notified100Month String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   @@index([telegramId])
   @@map("fin_budgets")

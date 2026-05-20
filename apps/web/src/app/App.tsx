@@ -7,10 +7,12 @@ import { DashboardPage } from '@/pages/dashboard/DashboardPage';
 import { TransactionsPage } from '@/pages/transactions/TransactionsPage';
 import { AddTransactionPage } from '@/pages/transactions/AddTransactionPage';
 import { AnalyticsPage } from '@/pages/analytics/AnalyticsPage';
+import { CategoryDetailPage } from '@/pages/analytics/CategoryDetailPage';
 import { GoalsPage } from '@/pages/goals/GoalsPage';
 import { BudgetPage } from '@/pages/budget/BudgetPage';
 import { AiChatPage } from '@/pages/ai-chat/AiChatPage';
 import { ProfilePage } from '@/pages/profile/ProfilePage';
+import { RecurringPage } from '@/pages/recurring/RecurringPage';
 import { useAuthStore } from '@/features/auth/store';
 import { rehydrateFromCloud } from '@/features/finance/store';
 
@@ -37,8 +39,10 @@ const router = createBrowserRouter(
         { path: 'transactions', element: <TransactionsPage /> },
         { path: 'transactions/add', element: <AddTransactionPage /> },
         { path: 'analytics', element: <AnalyticsPage /> },
+        { path: 'analytics/category/:categoryId', element: <CategoryDetailPage /> },
         { path: 'goals', element: <GoalsPage /> },
         { path: 'budget', element: <BudgetPage /> },
+        { path: 'recurring', element: <RecurringPage /> },
         { path: 'ai', element: <AiChatPage /> },
         { path: 'profile', element: <ProfilePage /> },
       ],

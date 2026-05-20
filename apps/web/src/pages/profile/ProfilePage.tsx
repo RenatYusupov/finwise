@@ -752,6 +752,154 @@ function CloudSyncPanel({ localTxCount }: { localTxCount: number }) {
 
 // ─── Profile Page ─────────────────────────────────────────────────────────────
 
+// ── Notification Settings Panel (TASK-020) ────────────────────────────────────
+
+function NotificationSettingsPanel() {
+  const { notificationSettings, updateNotificationSettings } = useFinanceStore();
+
+  const settings = [
+    { key: 'budgetAlerts' as const, label: 'Превышение бюджета', icon: '⚠️', desc: 'Когда расходы достигают 80% или 100% лимита' },
+    { key: 'recurringReminders' as const, label: 'Регулярные платежи', icon: '📅', desc: 'Напоминание за 3 дня до платежа' },
+    { key: 'weeklyReport' as const, label: 'Еженедельный отчёт', icon: '📊', desc: 'Итоги недели каждое воскресенье' },
+    { key: 'aiInsights' as const, label: 'AI-инсайты', icon: '🤖', desc: 'Персональные советы от FinWise AI' },
+  ];
+
+  return (
+    <div className="bg-white rounded-2xl overflow-hidden" style={{ boxShadow: 'var(--shadow-card)' }}>
+      <div className="px-4 pt-4 pb-2 border-b border-gray-50">
+        <div className="font-bold text-gray-900 text-sm">🔔 Уведомления</div>
+        <div className="text-xs text-gray-400 mt-0.5">Настройте, какие уведомления получать</div>
+      </div>
+      {settings.map((s, i) => (
+        <div
+          key={s.key}
+          className={`flex items-center gap-3 px-4 py-3.5 ${i > 0 ? 'border-t border-gray-50' : ''}`}
+        >
+          <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg flex-shrink-0" style={{ background: '#F8F7FF' }}>
+            {s.icon}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="font-semibold text-gray-800 text-sm">{s.label}</div>
+            <div className="text-xs text-gray-400 leading-tight mt-0.5">{s.desc}</div>
+          </div>
+          <button
+            onClick={() => updateNotificationSettings({ [s.key]: !notificationSettings[s.key] })}
+            className={`relative w-12 h-6 rounded-full transition-colors flex-shrink-0 haptic ${
+              notificationSettings[s.key] ? 'bg-green-500' : 'bg-gray-200'
+            }`}
+            aria-label={`Toggle ${s.label}`}
+          >
+            <motion.div
+              animate={{ x: notificationSettings[s.key] ? 24 : 2 }}
+              transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+              className="absolute top-1 w-4 h-4 bg-white rounded-full shadow-sm"
+            />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Data Export Panel (TASK-021) ──────────────────────────────────────────────
+
+function DataExportPanel() {
+  const { transactions, goals, budgets } = useFinanceStore();
+  const [exporting, setExporting] = useState(false);
+  const [exported, setExported] = useState(false);
+
+  const exportAsCSV = () => {
+    setExporting(true);
+    try {
+      const headers = ['Дата', 'Тип', 'Сумма', 'Категория', 'Описание'];
+      const rows = transactions.map((t) => [
+        t.date,
+        t.type === 'expense' ? 'Расход' : 'Доход',
+        t.amount.toString(),
+        t.categoryId,
+        `"${(t.description ?? '').replace(/"/g, '""')}"`,
+      ]);
+      const csv = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+      const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `finwise_export_${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setExported(true);
+      setTimeout(() => setExported(false), 3000);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const exportAsJSON = () => {
+    setExporting(true);
+    try {
+      const data = {
+        exportedAt: new Date().toISOString(),
+        transactions,
+        goals,
+        budgets,
+      };
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `finwise_export_${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setExported(true);
+      setTimeout(() => setExported(false), 3000);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-2xl p-4" style={{ boxShadow: 'var(--shadow-card)' }}>
+      <div className="font-bold text-gray-900 text-sm mb-1">📤 Экспорт данных</div>
+      <div className="text-xs text-gray-400 mb-4">
+        {transactions.length} транзакций · {goals.length} целей · {budgets.length} бюджетов
+      </div>
+      <AnimatePresence>
+        {exported && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="mb-3 px-3 py-2 rounded-xl text-xs font-medium text-green-700"
+            style={{ background: '#E8FFF5' }}
+          >
+            ✅ Файл сохранён
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <div className="flex gap-3">
+        <motion.button
+          whileTap={{ scale: 0.97 }}
+          onClick={exportAsCSV}
+          disabled={exporting || transactions.length === 0}
+          className="flex-1 py-3 rounded-2xl font-semibold text-sm haptic disabled:opacity-40"
+          style={{ background: '#E8FFF5', color: '#00C896' }}
+        >
+          📊 CSV
+        </motion.button>
+        <motion.button
+          whileTap={{ scale: 0.97 }}
+          onClick={exportAsJSON}
+          disabled={exporting || transactions.length === 0}
+          className="flex-1 py-3 rounded-2xl font-semibold text-sm haptic disabled:opacity-40"
+          style={{ background: '#F0EEFF', color: '#6C63FF' }}
+        >
+          📋 JSON
+        </motion.button>
+      </div>
+    </div>
+  );
+}
+
 export function ProfilePage() {
   const { user, logout } = useAuthStore();
   const financeStore = useFinanceStore();
@@ -865,10 +1013,15 @@ export function ProfilePage() {
         </div>
       </div>
 
+      {/* Notification Settings (TASK-020) */}
+      <NotificationSettingsPanel />
+
+      {/* Data Export (TASK-021) */}
+      <DataExportPanel />
+
       {/* Settings */}
       <div className="bg-white rounded-2xl overflow-hidden" style={{ boxShadow: 'var(--shadow-card)' }}>
         {[
-          { icon: '🔔', label: 'Уведомления', action: () => alert('Уведомления настраиваются в Telegram') },
           { icon: '📂', label: 'Импорт выписки из банка', action: () => setShowFileModal(true) },
           { icon: '🔒', label: 'Конфиденциальность', action: () => alert('Все данные хранятся локально на вашем устройстве') },
           { icon: '❓', label: 'Помощь', action: () => alert('Напишите нам: @finwise_support') },

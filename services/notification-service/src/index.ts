@@ -1,32 +1,26 @@
 import Fastify from 'fastify';
-import { Telegraf } from 'telegraf';
-import { Queue, Worker, Job } from 'bullmq';
-import { PrismaClient } from '@prisma/client';
-import Redis from 'ioredis';
-import { z } from 'zod';
+import cors from '@fastify/cors';
+import helmet from '@fastify/helmet';
+import cron from 'node-cron';
 
 const app = Fastify({ logger: true });
-const prisma = new PrismaClient();
 
-const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
-const PORT = parseInt(process.env.NOTIFICATION_SERVICE_PORT || '3004');
+const BOT_TOKEN = process.env.BOT_TOKEN ?? process.env.TELEGRAM_BOT_TOKEN ?? '';
+const FINANCE_SERVICE_URL = process.env.FINANCE_SERVICE_URL ?? 'http://localhost:3002';
+const AI_SERVICE_URL = process.env.AI_SERVICE_URL ?? 'http://localhost:3003';
+const PORT = parseInt(process.env.NOTIFICATION_SERVICE_PORT ?? '3004', 10);
 
-// Redis connection for BullMQ
-const redisConnection = new Redis(REDIS_URL, { maxRetriesPerRequest: null });
+if (!BOT_TOKEN) {
+  console.error('[notification-service] FATAL: BOT_TOKEN environment variable is required');
+  process.exit(1);
+}
 
-// Telegraf bot instance (used only for sending messages, not for handling updates)
-const bot = BOT_TOKEN ? new Telegraf(BOT_TOKEN) : null;
+await app.register(cors, { origin: true });
+await app.register(helmet);
 
-// ─── Notification Queues ──────────────────────────────────────────────────────
-
-const notificationQueue = new Queue('notifications', { connection: redisConnection });
-const weeklyReportQueue = new Queue('weekly-reports', { connection: redisConnection });
-
-// ─── Notification Types ───────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 interface BudgetAlertPayload {
-  type: 'budget_alert';
   telegramId: string;
   categoryName: string;
   spent: number;
@@ -34,32 +28,20 @@ interface BudgetAlertPayload {
   percentage: number;
 }
 
-interface GoalAchievedPayload {
-  type: 'goal_achieved';
+interface RecurringReminderPayload {
   telegramId: string;
-  goalName: string;
-  targetAmount: number;
+  label: string;
+  amount: number;
 }
 
 interface WeeklyReportPayload {
-  type: 'weekly_report';
   telegramId: string;
-  userId: string;
+  text: string;
 }
 
-interface StreakPayload {
-  type: 'streak_milestone';
-  telegramId: string;
-  streakDays: number;
-}
+type NotificationType = 'budget_alert' | 'recurring_reminder' | 'weekly_report' | 'test';
 
-type NotificationPayload =
-  | BudgetAlertPayload
-  | GoalAchievedPayload
-  | WeeklyReportPayload
-  | StreakPayload;
-
-// ─── Message Formatters ───────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function formatCurrency(amount: number): string {
   return new Intl.NumberFormat('ru-RU', {
@@ -70,285 +52,189 @@ function formatCurrency(amount: number): string {
 }
 
 function buildBudgetAlertMessage(payload: BudgetAlertPayload): string {
-  const emoji = payload.percentage >= 100 ? '🚨' : payload.percentage >= 80 ? '⚠️' : '📊';
-  const status = payload.percentage >= 100 ? 'превышен' : `использован на ${payload.percentage}%`;
-
-  return (
-    `${emoji} *Бюджет ${status}*\n\n` +
-    `Категория: *${payload.categoryName}*\n` +
-    `Потрачено: ${formatCurrency(payload.spent)}\n` +
-    `Лимит: ${formatCurrency(payload.limit)}\n\n` +
-    (payload.percentage >= 100
-      ? '❗ Вы превысили бюджет. Постарайтесь сократить расходы до конца месяца.'
-      : '💡 Следите за расходами, чтобы не выйти за рамки бюджета.')
-  );
+  const threshold = payload.percentage >= 100 ? '100%' : '80%';
+  const emoji = payload.percentage >= 100 ? '🚨' : '⚠️';
+  return `${emoji} Вы потратили ${threshold} бюджета на ${payload.categoryName}: ${formatCurrency(payload.spent)} из ${formatCurrency(payload.limit)}`;
 }
 
-function buildGoalAchievedMessage(payload: GoalAchievedPayload): string {
-  return (
-    `🎉 *Цель достигнута!*\n\n` +
-    `Поздравляем! Вы накопили ${formatCurrency(payload.targetAmount)} на цель:\n` +
-    `*"${payload.goalName}"*\n\n` +
-    `🏆 Отличная работа! Продолжайте в том же духе и ставьте новые финансовые цели.`
-  );
+function buildRecurringReminderMessage(payload: RecurringReminderPayload): string {
+  return `📅 Через 3 дня ожидается платёж: ${payload.label} ~${formatCurrency(payload.amount)}`;
 }
 
-function buildStreakMessage(payload: StreakPayload): string {
-  const milestoneEmoji =
-    payload.streakDays >= 30
-      ? '🔥🔥🔥'
-      : payload.streakDays >= 14
-        ? '🔥🔥'
-        : '🔥';
-
-  return (
-    `${milestoneEmoji} *Серия ${payload.streakDays} дней!*\n\n` +
-    `Вы ведёте учёт финансов уже ${payload.streakDays} дней подряд!\n\n` +
-    `Продолжайте — финансовая дисциплина приводит к реальным результатам. 💪`
-  );
+function buildWeeklyReportMessage(payload: WeeklyReportPayload): string {
+  return `📊 Еженедельный отчёт FinWise\n\n${payload.text}`;
 }
 
-async function buildWeeklyReportMessage(userId: string): Promise<string> {
-  const now = new Date();
-  const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+async function sendTelegramMessage(telegramId: string, text: string, type: NotificationType, attempt = 1): Promise<void> {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
 
-  // Fetch transactions for the past week
-  const transactions = await prisma.transaction.findMany({
-    where: {
-      userId,
-      date: { gte: weekAgo, lte: now },
-    },
-    include: { category: true },
-  });
-
-  const income = transactions
-    .filter((t) => t.type === 'INCOME')
-    .reduce((sum, t) => sum + t.amount.toNumber(), 0);
-
-  const expenses = transactions
-    .filter((t) => t.type === 'EXPENSE')
-    .reduce((sum, t) => sum + t.amount.toNumber(), 0);
-
-  // Top expense categories
-  const categoryMap = new Map<string, number>();
-  transactions
-    .filter((t) => t.type === 'EXPENSE')
-    .forEach((t) => {
-      const name = t.category?.name || 'Прочее';
-      categoryMap.set(name, (categoryMap.get(name) || 0) + t.amount.toNumber());
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: telegramId, text, parse_mode: 'HTML' }),
     });
 
-  const topCategories = Array.from(categoryMap.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 3);
-
-  const balance = income - expenses;
-  const balanceEmoji = balance >= 0 ? '📈' : '📉';
-
-  let message =
-    `📊 *Еженедельный отчёт FinWise*\n` +
-    `_${formatDate(weekAgo)} — ${formatDate(now)}_\n\n` +
-    `💰 Доходы: *${formatCurrency(income)}*\n` +
-    `💸 Расходы: *${formatCurrency(expenses)}*\n` +
-    `${balanceEmoji} Баланс: *${formatCurrency(balance)}*\n\n`;
-
-  if (topCategories.length > 0) {
-    message += `🏷 *Топ расходов:*\n`;
-    topCategories.forEach(([name, amount], i) => {
-      message += `${i + 1}. ${name}: ${formatCurrency(amount)}\n`;
-    });
-    message += '\n';
-  }
-
-  if (transactions.length === 0) {
-    message += '💡 На этой неделе транзакций не было. Не забывайте вести учёт!';
-  } else if (balance < 0) {
-    message += '⚠️ На этой неделе расходы превысили доходы. Проверьте бюджет!';
-  } else {
-    message += '✅ Отличная неделя! Продолжайте следить за финансами.';
-  }
-
-  return message;
-}
-
-function formatDate(date: Date): string {
-  return date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
-}
-
-// ─── Notification Worker ──────────────────────────────────────────────────────
-
-const notificationWorker = new Worker<NotificationPayload>(
-  'notifications',
-  async (job: Job<NotificationPayload>) => {
-    const payload = job.data;
-
-    if (!bot) {
-      app.log.warn('Bot token not configured, skipping notification');
+    if (response.status === 403) {
+      app.log.warn({ telegramId, type, status: 403, attempt }, 'Notification blocked by user');
       return;
     }
 
-    let message: string;
-
-    switch (payload.type) {
-      case 'budget_alert':
-        message = buildBudgetAlertMessage(payload);
-        break;
-      case 'goal_achieved':
-        message = buildGoalAchievedMessage(payload);
-        break;
-      case 'streak_milestone':
-        message = buildStreakMessage(payload);
-        break;
-      case 'weekly_report':
-        message = await buildWeeklyReportMessage(payload.userId);
-        break;
-      default:
-        app.log.warn('Unknown notification type');
-        return;
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Telegram API ${response.status}: ${body}`);
     }
 
-    try {
-      await bot.telegram.sendMessage(payload.telegramId, message, {
-        parse_mode: 'Markdown',
-      });
-      app.log.info(`Notification sent to ${payload.telegramId}: ${payload.type}`);
-    } catch (err: any) {
-      app.log.error(`Failed to send notification to ${payload.telegramId}: ${err.message}`);
-      throw err; // BullMQ will retry
-    }
-  },
-  { connection: redisConnection, concurrency: 5 }
-);
-
-// Weekly report worker
-const weeklyReportWorker = new Worker(
-  'weekly-reports',
-  async (job: Job) => {
-    app.log.info('Processing weekly reports batch...');
-
-    // Get all users who have notifications enabled
-    const users = await prisma.user.findMany({
-      where: { onboardingCompleted: true },
-      select: { id: true, telegramId: true },
-    });
-
-    app.log.info(`Sending weekly reports to ${users.length} users`);
-
-    for (const user of users) {
-      await notificationQueue.add(
-        'weekly_report',
-        {
-          type: 'weekly_report',
-          telegramId: user.telegramId,
-          userId: user.id,
-        } as WeeklyReportPayload,
-        { attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
-      );
-    }
-  },
-  { connection: redisConnection }
-);
-
-notificationWorker.on('completed', (job) => {
-  app.log.info(`Notification job ${job.id} completed`);
-});
-
-notificationWorker.on('failed', (job, err) => {
-  app.log.error(`Notification job ${job?.id} failed: ${err.message}`);
-});
-
-// ─── API Routes ───────────────────────────────────────────────────────────────
-
-// Send a notification immediately
-const sendNotificationSchema = z.object({
-  type: z.enum(['budget_alert', 'goal_achieved', 'streak_milestone', 'weekly_report']),
-  telegramId: z.string(),
-  userId: z.string().optional(),
-  categoryName: z.string().optional(),
-  spent: z.number().optional(),
-  limit: z.number().optional(),
-  percentage: z.number().optional(),
-  goalName: z.string().optional(),
-  targetAmount: z.number().optional(),
-  streakDays: z.number().optional(),
-});
-
-app.post('/notifications/send', async (request, reply) => {
-  const body = sendNotificationSchema.parse(request.body);
-
-  await notificationQueue.add('notification', body as NotificationPayload, {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 2000 },
-  });
-
-  return reply.status(202).send({ queued: true });
-});
-
-// Schedule weekly reports (called by a cron job or scheduler)
-app.post('/notifications/weekly-reports/trigger', async (_request, reply) => {
-  await weeklyReportQueue.add('trigger', {}, {
-    attempts: 1,
-  });
-
-  return reply.status(202).send({ triggered: true });
-});
-
-// Health check
-app.get('/health', async () => {
-  const redisStatus = await redisConnection.ping().then(() => 'ok').catch(() => 'error');
-  return {
-    status: 'ok',
-    redis: redisStatus,
-    bot: bot ? 'configured' : 'not configured',
-    workers: {
-      notifications: notificationWorker.isRunning() ? 'running' : 'stopped',
-      weeklyReports: weeklyReportWorker.isRunning() ? 'running' : 'stopped',
-    },
-  };
-});
-
-// Queue stats
-app.get('/notifications/stats', async () => {
-  const [waiting, active, completed, failed] = await Promise.all([
-    notificationQueue.getWaitingCount(),
-    notificationQueue.getActiveCount(),
-    notificationQueue.getCompletedCount(),
-    notificationQueue.getFailedCount(),
-  ]);
-
-  return { waiting, active, completed, failed };
-});
-
-// ─── Graceful Shutdown ────────────────────────────────────────────────────────
-
-async function shutdown() {
-  app.log.info('Shutting down notification service...');
-  await notificationWorker.close();
-  await weeklyReportWorker.close();
-  await notificationQueue.close();
-  await weeklyReportQueue.close();
-  await redisConnection.quit();
-  await prisma.$disconnect();
-  process.exit(0);
-}
-
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
-
-// ─── Start Server ─────────────────────────────────────────────────────────────
-
-async function start() {
-  try {
-    await app.listen({ port: PORT, host: '0.0.0.0' });
-    app.log.info(`Notification service running on port ${PORT}`);
-
-    if (!bot) {
-      app.log.warn('TELEGRAM_BOT_TOKEN not set — notifications will be logged only');
-    }
+    app.log.info({ telegramId, type, sentAt: new Date().toISOString(), status: 'sent', attempt }, 'Notification sent');
   } catch (err) {
-    app.log.error(err);
-    process.exit(1);
+    app.log.error({ telegramId, type, attempt, err }, 'Notification send failed');
+    if (attempt >= 3) return;
+
+    // Retry after 5 minutes, max 3 attempts.
+    setTimeout(() => {
+      sendTelegramMessage(telegramId, text, type, attempt + 1).catch((retryErr) => {
+        app.log.error({ telegramId, type, retryErr }, 'Notification retry failed');
+      });
+    }, 5 * 60_000);
   }
 }
 
-start();
+// ── API Routes ────────────────────────────────────────────────────────────────
+
+app.get('/health', async (_req: any, reply: any) => {
+  return reply.send({ status: 'ok', service: 'notification-service' });
+});
+
+app.post('/notify/budget-alert', async (req: any, reply: any) => {
+  const payload = req.body as BudgetAlertPayload;
+  if (!payload?.telegramId || !payload.categoryName || !payload.limit) {
+    return reply.status(400).send({ error: 'telegramId, categoryName and limit are required' });
+  }
+
+  // TASK-020 notification settings are not implemented yet; default is enabled.
+  const text = buildBudgetAlertMessage(payload);
+  await sendTelegramMessage(payload.telegramId, text, 'budget_alert');
+  return reply.send({ data: { queued: true } });
+});
+
+app.post('/notify/test', async (req: any, reply: any) => {
+  if (process.env.NODE_ENV !== 'development') {
+    return reply.status(403).send({ error: 'Test notifications are only available in development' });
+  }
+
+  const { telegramId, text } = req.body as { telegramId?: string; text?: string };
+  if (!telegramId) return reply.status(400).send({ error: 'telegramId required' });
+
+  await sendTelegramMessage(telegramId, text ?? '✅ Тестовое уведомление FinWise', 'test');
+  return reply.send({ data: { sent: true } });
+});
+
+// ── Cron jobs ─────────────────────────────────────────────────────────────────
+
+// Daily at 10:00 UTC — recurring payment reminders.
+cron.schedule('0 10 * * *', async () => {
+  app.log.info({ FINANCE_SERVICE_URL }, 'Recurring payment reminder cron started');
+  // User notification settings and server-side user listing are implemented in TASK-020.
+  // This job is intentionally safe/no-op until finance-service exposes user notification settings.
+}, { timezone: 'UTC' });
+
+// Weekly report: Sundays at 18:00 UTC (TASK-019).
+cron.schedule('0 18 * * 0', async () => {
+  app.log.info({ FINANCE_SERVICE_URL, AI_SERVICE_URL }, 'Weekly report cron started');
+
+  try {
+    // Fetch active users from finance-service
+    const usersRes = await fetch(`${FINANCE_SERVICE_URL}/users/active`, {
+      headers: { 'x-internal-secret': process.env.INTERNAL_SECRET ?? 'finwise-internal' },
+    });
+
+    if (!usersRes.ok) {
+      app.log.warn('Could not fetch active users for weekly report');
+      return;
+    }
+
+    const { users } = await usersRes.json() as { users: Array<{ telegramId: string; weeklyData: any }> };
+
+    for (const user of users) {
+      try {
+        // Get AI-generated weekly summary
+        const summaryRes = await fetch(`${AI_SERVICE_URL}/ai/weekly-summary`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-internal-secret': process.env.INTERNAL_SECRET ?? 'finwise-internal',
+          },
+          body: JSON.stringify({ telegramId: user.telegramId, weeklyData: user.weeklyData }),
+        });
+
+        if (summaryRes.ok) {
+          const { message } = await summaryRes.json() as { message: string };
+          if (message) {
+            await sendTelegramMessage(user.telegramId, message, 'weekly_report');
+          }
+        } else {
+          // Fallback: plain text report
+          const wd = user.weeklyData;
+          const fallback = `📊 <b>Итоги недели FinWise</b>\n\nРасходы: ${wd?.totalExpenses ?? 0} ₽\nДоходы: ${wd?.totalIncome ?? 0} ₽\nТранзакций: ${wd?.transactionCount ?? 0}`;
+          await sendTelegramMessage(user.telegramId, fallback, 'weekly_report');
+        }
+      } catch (userErr) {
+        app.log.error({ telegramId: user.telegramId, userErr }, 'Failed to send weekly report to user');
+      }
+    }
+  } catch (err) {
+    app.log.error({ err }, 'Weekly report cron failed');
+  }
+}, { timezone: 'UTC' });
+
+// ── API: Manual weekly report trigger (for testing) ───────────────────────────
+
+app.post('/notify/weekly-report', async (req: any, reply: any) => {
+  const { telegramId, weeklyData } = req.body as { telegramId?: string; weeklyData?: any };
+  if (!telegramId) return reply.status(400).send({ error: 'telegramId required' });
+
+  try {
+    // Try AI summary first
+    const summaryRes = await fetch(`${AI_SERVICE_URL}/ai/weekly-summary`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-internal-secret': process.env.INTERNAL_SECRET ?? 'finwise-internal',
+      },
+      body: JSON.stringify({ telegramId, weeklyData: weeklyData ?? {} }),
+    });
+
+    let message: string;
+    if (summaryRes.ok) {
+      const data = await summaryRes.json() as { message: string };
+      message = data.message || buildWeeklyReportMessage({ telegramId, text: 'Нет данных за неделю' });
+    } else {
+      message = buildWeeklyReportMessage({ telegramId, text: 'Нет данных за неделю' });
+    }
+
+    await sendTelegramMessage(telegramId, message, 'weekly_report');
+    return reply.send({ data: { sent: true } });
+  } catch (err) {
+    app.log.error({ err }, 'Manual weekly report failed');
+    return reply.status(500).send({ error: 'Failed to send weekly report' });
+  }
+});
+
+// Internal helper for future cron expansion.
+export async function sendRecurringReminder(payload: RecurringReminderPayload): Promise<void> {
+  await sendTelegramMessage(payload.telegramId, buildRecurringReminderMessage(payload), 'recurring_reminder');
+}
+
+export async function sendWeeklyReport(payload: WeeklyReportPayload): Promise<void> {
+  await sendTelegramMessage(payload.telegramId, buildWeeklyReportMessage(payload), 'weekly_report');
+}
+
+// ── Start ─────────────────────────────────────────────────────────────────────
+
+try {
+  await app.listen({ port: PORT, host: '0.0.0.0' });
+  console.log(`[notification-service] Running on port ${PORT}`);
+} catch (err) {
+  app.log.error(err);
+  process.exit(1);
+}

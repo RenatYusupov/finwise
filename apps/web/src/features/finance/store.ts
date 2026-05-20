@@ -35,6 +35,17 @@ export interface Goal {
   deadline?: string;
   color: string;
   createdAt: string;
+  // TASK-023: linked category
+  linkedCategoryId?: string;
+  linkedCategoryMode?: 'savings' | 'spending';
+  linkedSince?: string; // ISO date — transactions before this date are not counted
+}
+
+export interface NotificationSettings {
+  budgetAlerts: boolean;
+  recurringReminders: boolean;
+  weeklyReport: boolean;
+  aiInsights: boolean;
 }
 
 export interface Budget {
@@ -556,6 +567,8 @@ export interface FinanceState {
   recurringPayments: RecurringPayment[];
   streak: number;
   lastActiveDate: string;
+  // TASK-020: notification settings
+  notificationSettings: NotificationSettings;
 
   addTransaction: (tx: Omit<Transaction, 'id' | 'category'>) => void;
   /** Batch import with deduplication. Returns { imported, skipped } counts. */
@@ -570,6 +583,8 @@ export interface FinanceState {
   clearAiChat: () => void;
   clearAllData: () => void;
   updateStreak: () => void;
+  // TASK-020
+  updateNotificationSettings: (settings: Partial<NotificationSettings>) => void;
 
   // Recurring payments CRUD
   addRecurringPayment: (p: Omit<RecurringPayment, 'id' | 'createdAt'>) => void;
@@ -577,6 +592,7 @@ export interface FinanceState {
   deleteRecurringPayment: (id: string) => void;
   /** Run auto-detection and merge new candidates into the store (does not overwrite existing). */
   runDetectRecurringPayments: () => void;
+  getUpcomingPayments: (days: number) => Array<RecurringPayment & { dueDate: string; daysUntil: number }>;
 
   // Computed helpers
   getMonthSummary: () => { income: number; expenses: number; savings: number; savingsRate: number };
@@ -594,6 +610,12 @@ export const useFinanceStore = create<FinanceState>()(
       recurringPayments: [],
       streak: 1,
       lastActiveDate: new Date().toISOString().split('T')[0] ?? '',
+      notificationSettings: {
+        budgetAlerts: true,
+        recurringReminders: true,
+        weeklyReport: true,
+        aiInsights: true,
+      },
 
       addTransaction: (tx) => {
         const category = getCategoryById(tx.categoryId) ?? {
@@ -608,8 +630,24 @@ export const useFinanceStore = create<FinanceState>()(
           id: `tx_${Date.now()}_${Math.random().toString(36).slice(2)}`,
           category,
         };
-        set((s) => ({ transactions: [newTx, ...s.transactions] }));
+        set((s) => {
+          // TASK-023: update linked goals
+          const updatedGoals = s.goals.map((g) => {
+            if (!g.linkedCategoryId || g.linkedCategoryId !== tx.categoryId) return g;
+            if (g.linkedSince && tx.date < g.linkedSince) return g;
+            if (g.linkedCategoryMode === 'savings' && tx.type === 'income') {
+              return { ...g, currentAmount: Math.min(g.targetAmount, g.currentAmount + tx.amount) };
+            }
+            return g;
+          });
+          return { transactions: [newTx, ...s.transactions], goals: updatedGoals };
+        });
         get().updateStreak();
+        scheduleCloudUpload();
+      },
+
+      updateNotificationSettings: (settings) => {
+        set((s) => ({ notificationSettings: { ...s.notificationSettings, ...settings } }));
         scheduleCloudUpload();
       },
 
@@ -765,6 +803,33 @@ export const useFinanceStore = create<FinanceState>()(
             ...newCandidates,
           ],
         }));
+      },
+
+      getUpcomingPayments: (days) => {
+        const now = new Date();
+        const end = new Date(now);
+        end.setDate(now.getDate() + days);
+
+        const daysInMonth = (d: Date) => new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+        const dueFor = (p: RecurringPayment): { dueDate: string; daysUntil: number } => {
+          const mkDate = (base: Date) => {
+            const maxDay = daysInMonth(base);
+            return new Date(base.getFullYear(), base.getMonth(), Math.min(p.dayOfMonth, maxDay));
+          };
+          let due = mkDate(now);
+          if (due < new Date(now.getFullYear(), now.getMonth(), now.getDate())) {
+            due = mkDate(new Date(now.getFullYear(), now.getMonth() + 1, 1));
+          }
+          const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+          const daysUntil = Math.round((due.getTime() - todayStart) / 86400000);
+          return { dueDate: due.toISOString(), daysUntil };
+        };
+
+        return get().recurringPayments
+          .filter((p) => !p.dismissedByUser && (p.confirmedByUser || p.source === 'manual'))
+          .map((p) => ({ ...p, ...dueFor(p) }))
+          .filter((p) => p.daysUntil >= 0 && p.daysUntil <= days)
+          .sort((a, b) => a.daysUntil - b.daysUntil);
       },
 
       updateStreak: () => {

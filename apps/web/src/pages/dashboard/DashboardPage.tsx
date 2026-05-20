@@ -4,6 +4,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useFinanceStore, type Transaction, type RecurringPayment } from '@/features/finance/store';
 import { useAuthStore } from '@/features/auth/store';
 import { formatCurrency } from '@/shared/utils/format';
+import { ProactiveAiInsightCard } from '@/features/analytics/AiInsightCard';
 
 // ─── Spending Profile ─────────────────────────────────────────────────────────
 //
@@ -459,6 +460,47 @@ function AiInsightBanner({ expenses, income, navigate }: { expenses: number; inc
   );
 }
 
+function UpcomingPaymentsWidget({ navigate }: { navigate: (p: string) => void }) {
+  const upcoming = useFinanceStore((s) => s.getUpcomingPayments(7));
+  if (upcoming.length === 0) return null;
+
+  const total = upcoming.reduce((sum, p) => sum + p.amountMedian, 0);
+  const visible = upcoming.slice(0, 3);
+  const extra = upcoming.length - visible.length;
+  const labelFor = (days: number) => days === 0 ? 'Сегодня' : days === 1 ? 'Завтра' : `через ${days} дн.`;
+
+  return (
+    <motion.button
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      onClick={() => navigate('/recurring')}
+      className="w-full text-left bg-white rounded-2xl p-4 haptic"
+      style={{ boxShadow: 'var(--shadow-card)' }}
+    >
+      <div className="flex items-center justify-between mb-3">
+        <div className="font-bold text-gray-900 text-sm">🔁 Ближайшие платежи</div>
+        <div className="text-xs font-semibold text-purple-600">Все →</div>
+      </div>
+      <div className="space-y-2">
+        {visible.map((p) => (
+          <div key={p.id} className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-gray-800 truncate">{p.label}</div>
+              <div className={`text-xs ${p.daysUntil === 0 ? 'text-red-500' : p.daysUntil === 1 ? 'text-orange-500' : 'text-gray-400'}`}>{labelFor(p.daysUntil)}</div>
+            </div>
+            <div className="text-sm font-bold text-gray-900 flex-shrink-0">{formatCurrency(p.amountMedian)}</div>
+          </div>
+        ))}
+        {extra > 0 && <div className="text-xs text-gray-400">+{extra} ещё</div>}
+      </div>
+      <div className="mt-3 pt-3 border-t border-gray-100 flex justify-between text-sm">
+        <span className="text-gray-500">Итого в ближайшие 7 дней</span>
+        <span className="font-bold text-gray-900">{formatCurrency(total)}</span>
+      </div>
+    </motion.button>
+  );
+}
+
 export function DashboardPage() {
   const { user } = useAuthStore();
   const {
@@ -556,8 +598,11 @@ export function DashboardPage() {
         income={summary.income}
       />
 
-      {/* AI Insight banner */}
-      <AiInsightBanner expenses={summary.expenses} income={summary.income} navigate={navigate} />
+      {/* Proactive AI insights */}
+      <ProactiveAiInsightCard transactions={transactions} />
+
+      {/* Upcoming recurring payments */}
+      <UpcomingPaymentsWidget navigate={navigate} />
 
       {/* Quick actions */}
       <div className="grid grid-cols-4 gap-2">

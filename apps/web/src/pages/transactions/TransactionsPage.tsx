@@ -1,9 +1,68 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { createPortal } from 'react-dom';
 import { useFinanceStore, EXPENSE_CATEGORIES, INCOME_CATEGORIES, type Transaction } from '@/features/finance/store';
 import { formatCurrency } from '@/shared/utils/format';
+
+type TxPeriod = 'all' | 'week' | 'month' | 'prev_month' | 'custom';
+type TxSort = 'date_desc' | 'date_asc' | 'amount_desc' | 'amount_asc';
+
+type TxFilters = {
+  type: 'all' | 'expense' | 'income';
+  categoryIds: string[];
+  period: TxPeriod;
+  from: string;
+  to: string;
+  minAmount: string;
+  maxAmount: string;
+  sort: TxSort;
+};
+
+const DEFAULT_FILTERS: TxFilters = {
+  type: 'all',
+  categoryIds: [],
+  period: 'all',
+  from: '',
+  to: '',
+  minAmount: '',
+  maxAmount: '',
+  sort: 'date_desc',
+};
+
+const FILTERS_STORAGE_KEY = 'fw_transactions_filters_v1';
+
+function loadFilters(): TxFilters {
+  try {
+    const raw = sessionStorage.getItem(FILTERS_STORAGE_KEY);
+    return raw ? { ...DEFAULT_FILTERS, ...JSON.parse(raw) } : DEFAULT_FILTERS;
+  } catch {
+    return DEFAULT_FILTERS;
+  }
+}
+
+function periodRange(period: TxPeriod, customFrom: string, customTo: string): { from?: Date; to?: Date } {
+  const now = new Date();
+  const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+  if (period === 'week') {
+    const from = new Date(now);
+    from.setDate(now.getDate() - 6);
+    from.setHours(0, 0, 0, 0);
+    return { from, to: todayEnd };
+  }
+  if (period === 'month') return { from: new Date(now.getFullYear(), now.getMonth(), 1), to: todayEnd };
+  if (period === 'prev_month') return {
+    from: new Date(now.getFullYear(), now.getMonth() - 1, 1),
+    to: new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999),
+  };
+  if (period === 'custom') {
+    const range: { from?: Date; to?: Date } = {};
+    if (customFrom) range.from = new Date(customFrom);
+    if (customTo) range.to = new Date(`${customTo}T23:59:59.999`);
+    return range;
+  }
+  return {};
+}
 
 // ─── Edit Transaction Sheet ───────────────────────────────────────────────────
 
@@ -383,12 +442,71 @@ function SwipeableRow({
 
 export function TransactionsPage() {
   const { transactions, deleteTransaction, getMonthSummary } = useFinanceStore();
-  const [filter, setFilter] = useState<'all' | 'expense' | 'income'>('all');
+  const [filters, setFilters] = useState<TxFilters>(() => loadFilters());
+  const [searchInput, setSearchInput] = useState(() => sessionStorage.getItem('fw_transactions_search') ?? '');
+  const [query, setQuery] = useState(searchInput);
+  const [showFilters, setShowFilters] = useState(false);
   const [editTx, setEditTx] = useState<Transaction | null>(null);
 
   const summary = getMonthSummary();
 
-  const filtered = transactions.filter((t) => filter === 'all' || t.type === filter);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const trimmed = searchInput.slice(0, 100);
+      setQuery(trimmed);
+      sessionStorage.setItem('fw_transactions_search', trimmed);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
+
+  useEffect(() => {
+    sessionStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(filters));
+  }, [filters]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const { from, to } = periodRange(filters.period, filters.from, filters.to);
+    const min = filters.minAmount ? Number(filters.minAmount) : null;
+    const max = filters.maxAmount ? Number(filters.maxAmount) : null;
+
+    return transactions
+      .filter((t) => filters.type === 'all' || t.type === filters.type)
+      .filter((t) => !q || t.description.toLowerCase().includes(q) || t.category?.name.toLowerCase().includes(q))
+      .filter((t) => filters.categoryIds.length === 0 || filters.categoryIds.includes(t.categoryId))
+      .filter((t) => {
+        const d = new Date(t.date);
+        if (from && d < from) return false;
+        if (to && d > to) return false;
+        return true;
+      })
+      .filter((t) => min === null || t.amount >= min)
+      .filter((t) => max === null || t.amount <= max)
+      .sort((a, b) => {
+        if (filters.sort === 'date_asc') return a.date.localeCompare(b.date);
+        if (filters.sort === 'amount_desc') return b.amount - a.amount;
+        if (filters.sort === 'amount_asc') return a.amount - b.amount;
+        return b.date.localeCompare(a.date);
+      });
+  }, [transactions, filters, query]);
+
+  const resetFilters = () => {
+    setFilters(DEFAULT_FILTERS);
+    setSearchInput('');
+    setQuery('');
+    sessionStorage.removeItem(FILTERS_STORAGE_KEY);
+    sessionStorage.removeItem('fw_transactions_search');
+  };
+
+  const allCategories = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES];
+  const amountRangeInvalid = !!filters.minAmount && !!filters.maxAmount && Number(filters.minAmount) > Number(filters.maxAmount);
+  const activeChips = [
+    query ? { key: 'query', label: `Поиск: ${query}`, clear: () => { setSearchInput(''); setQuery(''); } } : null,
+    filters.type !== 'all' ? { key: 'type', label: filters.type === 'expense' ? 'Расходы' : 'Доходы', clear: () => setFilters((f) => ({ ...f, type: 'all' })) } : null,
+    ...filters.categoryIds.map((id) => ({ key: `cat-${id}`, label: allCategories.find((c) => c.id === id)?.name ?? id, clear: () => setFilters((f) => ({ ...f, categoryIds: f.categoryIds.filter((x) => x !== id) })) })),
+    filters.period !== 'all' ? { key: 'period', label: filters.period === 'week' ? 'Эта неделя' : filters.period === 'month' ? 'Этот месяц' : filters.period === 'prev_month' ? 'Прошлый месяц' : 'Период', clear: () => setFilters((f) => ({ ...f, period: 'all', from: '', to: '' })) } : null,
+    filters.minAmount ? { key: 'min', label: `от ${filters.minAmount} ₽`, clear: () => setFilters((f) => ({ ...f, minAmount: '' })) } : null,
+    filters.maxAmount ? { key: 'max', label: `до ${filters.maxAmount} ₽`, clear: () => setFilters((f) => ({ ...f, maxAmount: '' })) } : null,
+  ].filter(Boolean) as Array<{ key: string; label: string; clear: () => void }>;
 
   // Group by date
   const grouped = filtered.reduce<Record<string, typeof filtered>>((acc, tx) => {
@@ -435,23 +553,105 @@ export function TransactionsPage() {
         </div>
       </div>
 
-      {/* Filter tabs */}
-      <div className="flex gap-1 mx-4 mt-3 bg-gray-100 rounded-2xl p-1">
-        {[
-          { label: 'Все', value: 'all' as const },
-          { label: 'Расходы', value: 'expense' as const },
-          { label: 'Доходы', value: 'income' as const },
-        ].map((tab) => (
+      {/* Search and filters */}
+      <div className="sticky top-0 z-20 mx-4 mt-3 space-y-2">
+        <div className="flex gap-2">
+          <div className="flex-1 bg-white rounded-2xl px-3 py-2 flex items-center gap-2 shadow-sm">
+            <span className="text-gray-400">🔍</span>
+            <input
+              defaultValue={searchInput}
+              onInput={(e) => setSearchInput((e.target as HTMLInputElement).value.slice(0, 100))}
+              placeholder="Поиск по описанию..."
+              className="flex-1 text-[16px] outline-none bg-transparent text-sm"
+            />
+          </div>
           <button
-            key={tab.value}
-            onClick={() => setFilter(tab.value)}
-            className={`flex-1 py-2 rounded-xl text-sm font-semibold haptic transition-all ${
-              filter === tab.value ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500'
-            }`}
+            onClick={() => setShowFilters((v) => !v)}
+            className="px-3 rounded-2xl bg-white shadow-sm text-sm font-semibold text-gray-700 haptic"
           >
-            {tab.label}
+            Фильтры{showFilters ? '▲' : '▼'}
           </button>
-        ))}
+        </div>
+
+        {showFilters && (
+          <div className="bg-white rounded-2xl p-3 shadow-sm space-y-3">
+            <div className="grid grid-cols-3 gap-1 bg-gray-100 rounded-xl p-1">
+              {[
+                { label: 'Все', value: 'all' as const },
+                { label: 'Расходы', value: 'expense' as const },
+                { label: 'Доходы', value: 'income' as const },
+              ].map((tab) => (
+                <button
+                  key={tab.value}
+                  onClick={() => setFilters((f) => ({ ...f, type: tab.value }))}
+                  className={`py-2 rounded-lg text-xs font-semibold haptic ${filters.type === tab.value ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500'}`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            <div>
+              <div className="text-xs font-bold text-gray-400 uppercase mb-2">Категории</div>
+              <div className="flex gap-2 overflow-x-auto pb-1">
+                {allCategories.map((cat) => {
+                  const active = filters.categoryIds.includes(cat.id);
+                  return (
+                    <button
+                      key={cat.id}
+                      onClick={() => setFilters((f) => ({ ...f, categoryIds: active ? f.categoryIds.filter((id) => id !== cat.id) : [...f.categoryIds, cat.id] }))}
+                      className="flex-shrink-0 px-3 py-2 rounded-xl text-xs font-semibold haptic"
+                      style={{ background: active ? '#6C63FF' : '#F3F4F6', color: active ? '#fff' : '#374151' }}
+                    >
+                      {cat.icon} {cat.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <select value={filters.period} onChange={(e) => setFilters((f) => ({ ...f, period: e.target.value as TxPeriod }))} className="rounded-xl bg-gray-100 px-3 py-2 text-[16px] text-sm">
+                <option value="all">Весь период</option>
+                <option value="week">Эта неделя</option>
+                <option value="month">Этот месяц</option>
+                <option value="prev_month">Прошлый месяц</option>
+                <option value="custom">Произвольный</option>
+              </select>
+              <select value={filters.sort} onChange={(e) => setFilters((f) => ({ ...f, sort: e.target.value as TxSort }))} className="rounded-xl bg-gray-100 px-3 py-2 text-[16px] text-sm">
+                <option value="date_desc">Новые сначала</option>
+                <option value="date_asc">Старые сначала</option>
+                <option value="amount_desc">Сумма: больше</option>
+                <option value="amount_asc">Сумма: меньше</option>
+              </select>
+            </div>
+
+            {filters.period === 'custom' && (
+              <div className="grid grid-cols-2 gap-2">
+                <input type="date" value={filters.from} onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))} className="rounded-xl bg-gray-100 px-3 py-2 text-[16px] text-sm" />
+                <input type="date" value={filters.to} onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))} className="rounded-xl bg-gray-100 px-3 py-2 text-[16px] text-sm" />
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-2">
+              <input type="number" inputMode="decimal" placeholder="Сумма от" value={filters.minAmount} onChange={(e) => setFilters((f) => ({ ...f, minAmount: e.target.value }))} className="rounded-xl bg-gray-100 px-3 py-2 text-[16px] text-sm" />
+              <input type="number" inputMode="decimal" placeholder="Сумма до" value={filters.maxAmount} onChange={(e) => setFilters((f) => ({ ...f, maxAmount: e.target.value }))} className={`rounded-xl px-3 py-2 text-[16px] text-sm ${amountRangeInvalid ? 'bg-red-50 border border-red-300' : 'bg-gray-100'}`} />
+            </div>
+          </div>
+        )}
+
+        {activeChips.length > 0 && (
+          <div className="flex gap-2 overflow-x-auto pb-1">
+            {activeChips.map((chip) => (
+              <button key={chip.key} onClick={chip.clear} className="flex-shrink-0 px-3 py-1.5 rounded-full bg-purple-50 text-purple-700 text-xs font-semibold haptic">
+                {chip.label} ✕
+              </button>
+            ))}
+            <button onClick={resetFilters} className="flex-shrink-0 px-3 py-1.5 rounded-full bg-gray-100 text-gray-500 text-xs font-semibold haptic">Сбросить</button>
+          </div>
+        )}
+
+        <div className="text-xs text-gray-400 px-1">Найдено: {filtered.length} транзакций</div>
       </div>
 
       {/* Swipe hint */}
@@ -467,14 +667,24 @@ export function TransactionsPage() {
         {filtered.length === 0 ? (
           <div className="text-center py-16 text-gray-400">
             <div className="text-4xl mb-3">💸</div>
-            <div className="font-medium text-gray-600 mb-1">Нет операций</div>
-            <div className="text-sm mb-4">Добавь первую транзакцию</div>
-            <Link
-              to="/transactions/add"
-              className="inline-block bg-blue-600 text-white font-semibold px-5 py-2.5 rounded-xl haptic text-sm"
-            >
-              + Добавить
-            </Link>
+            <div className="font-medium text-gray-600 mb-1">
+              {transactions.length === 0 ? 'Нет операций' : 'Ничего не найдено'}
+            </div>
+            <div className="text-sm mb-4">
+              {transactions.length === 0 ? 'Добавь первую транзакцию' : 'Попробуйте изменить фильтры'}
+            </div>
+            {transactions.length === 0 ? (
+              <Link
+                to="/transactions/add"
+                className="inline-block bg-blue-600 text-white font-semibold px-5 py-2.5 rounded-xl haptic text-sm"
+              >
+                + Добавить
+              </Link>
+            ) : (
+              <button onClick={resetFilters} className="inline-block bg-blue-600 text-white font-semibold px-5 py-2.5 rounded-xl haptic text-sm">
+                Сбросить фильтры
+              </button>
+            )}
           </div>
         ) : (
           Object.entries(grouped).map(([date, txs]) => (

@@ -2,48 +2,103 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import jwt from 'jsonwebtoken';
+import { createHash } from 'crypto';
 
 const app = Fastify({ logger: true });
-const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-secret-change-in-production';
+
+const JWT_SECRET = process.env.JWT_SECRET ?? '';
 const GROQ_API_KEY = process.env.GROQ_API_KEY ?? '';
 const GROQ_MODEL = process.env.GROQ_MODEL ?? 'llama-3.1-8b-instant';
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
+if (!JWT_SECRET) {
+  console.error('[ai-service] FATAL: JWT_SECRET environment variable is required');
+  process.exit(1);
+}
+if (!GROQ_API_KEY) {
+  console.error('[ai-service] FATAL: GROQ_API_KEY environment variable is required');
+  process.exit(1);
+}
+
 await app.register(cors, { origin: true });
 await app.register(helmet);
 
-// ── Auth helper ───────────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+interface GroqMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+interface CategorizeInput {
+  description: string;
+  amount: number;
+  type: 'expense' | 'income';
+  bankCategory?: string;
+  idx?: number;
+}
+
+interface CategorizeResult {
+  category: string;
+  categoryId: string;
+  confidence: number;
+  reasoning: string | null;
+}
+
+interface FinancialContext {
+  monthlyBudget?: number;
+  spentThisMonth?: number;
+  safeToSpend?: number;
+  topCategories?: Array<{ name: string; amount: number; percent?: number }>;
+  recentTransactions?: Array<{ description: string; amount: number; type: string; category?: string; date?: string }>;
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
 
 function getTelegramId(authHeader: string | undefined): string | null {
   if (!authHeader?.startsWith('Bearer ')) return null;
   try {
     const payload = jwt.verify(authHeader.slice(7), JWT_SECRET) as { sub: string; telegramId?: string };
-    // Support both sub (telegramId) and explicit telegramId field
     return payload.telegramId ?? payload.sub ?? null;
   } catch {
     return null;
   }
 }
 
-// ── Rate limiter (in-memory, per telegramId) ──────────────────────────────────
+// ── Rate limiting ─────────────────────────────────────────────────────────────
 
+const RATE_LIMIT = 10;
+const RATE_WINDOW_MS = 60_000;
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
-const RATE_LIMIT = 20; // requests per window
-const RATE_WINDOW_MS = 60_000; // 1 minute
 
-function checkRateLimit(telegramId: string): boolean {
+function checkRateLimit(telegramId: string): { ok: boolean; retryAfter: number } {
   const now = Date.now();
   const entry = rateLimitMap.get(telegramId);
   if (!entry || now > entry.resetAt) {
     rateLimitMap.set(telegramId, { count: 1, resetAt: now + RATE_WINDOW_MS });
-    return true;
+    return { ok: true, retryAfter: 0 };
   }
-  if (entry.count >= RATE_LIMIT) return false;
+  if (entry.count >= RATE_LIMIT) {
+    return { ok: false, retryAfter: Math.ceil((entry.resetAt - now) / 1000) };
+  }
   entry.count++;
-  return true;
+  return { ok: true, retryAfter: 0 };
 }
 
-// Clean up stale entries every 5 minutes
+function requireAuthAndRateLimit(req: any, reply: any): string | null {
+  const telegramId = getTelegramId(req.headers.authorization);
+  if (!telegramId) {
+    reply.status(401).send({ error: 'Unauthorized' });
+    return null;
+  }
+  const rate = checkRateLimit(telegramId);
+  if (!rate.ok) {
+    reply.status(429).send({ error: 'Rate limit exceeded', retryAfter: rate.retryAfter });
+    return null;
+  }
+  return telegramId;
+}
+
 setInterval(() => {
   const now = Date.now();
   for (const [key, val] of rateLimitMap.entries()) {
@@ -51,60 +106,94 @@ setInterval(() => {
   }
 }, 5 * 60_000);
 
-// ── Groq client ───────────────────────────────────────────────────────────────
+// ── Groq client with timeout ──────────────────────────────────────────────────
 
-interface GroqMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
+async function callGroq(messages: GroqMessage[], opts: { temperature?: number; maxTokens?: number } = {}): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+
+  try {
+    const response = await fetch(GROQ_API_URL, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        messages,
+        temperature: opts.temperature ?? 0.7,
+        max_tokens: opts.maxTokens ?? 512,
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      app.log.error(`Groq API error ${response.status}: ${errText}`);
+      throw new Error(`Groq API error: ${response.status}`);
+    }
+
+    const data = (await response.json()) as { choices: { message: { content: string } }[] };
+    return (data.choices?.[0]?.message?.content ?? '').trim();
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      const timeout = new Error('AI service timeout');
+      (timeout as any).code = 'AI_TIMEOUT';
+      throw timeout;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-async function callGroq(
-  messages: GroqMessage[],
-  opts: { temperature?: number; maxTokens?: number } = {}
-): Promise<string> {
-  if (!GROQ_API_KEY) {
-    return getMockResponse(messages[messages.length - 1]?.content ?? '');
+function sendGroqError(reply: any, err: unknown) {
+  if ((err as any)?.code === 'AI_TIMEOUT') {
+    return reply.status(504).send({ error: 'AI service timeout' });
   }
-
-  const response = await fetch(GROQ_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${GROQ_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      messages,
-      temperature: opts.temperature ?? 0.7,
-      max_tokens: opts.maxTokens ?? 512,
-    }),
-  });
-
-  if (!response.ok) {
-    const errText = await response.text();
-    app.log.error(`Groq API error ${response.status}: ${errText}`);
-    throw new Error(`Groq API error: ${response.status}`);
-  }
-
-  const data = (await response.json()) as { choices: { message: { content: string } }[] };
-  return (data.choices?.[0]?.message?.content ?? '').trim();
+  return reply.status(503).send({ error: 'AI service temporarily unavailable' });
 }
 
-function getMockResponse(userMessage: string): string {
-  const lower = userMessage.toLowerCase();
-  if (lower.includes('трат') || lower.includes('расход')) {
-    return 'По твоим данным, основные расходы идут на еду (35%) и транспорт (20%). Рекомендую установить бюджет на развлечения — там есть потенциал для экономии.';
+function extractJsonArray(content: string): unknown[] {
+  try {
+    const parsed = JSON.parse(content);
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && typeof parsed === 'object') {
+      const obj = parsed as Record<string, unknown>;
+      for (const key of ['transactions', 'result', 'items', 'data', 'list', 'insights']) {
+        if (Array.isArray(obj[key])) return obj[key] as unknown[];
+      }
+    }
+  } catch { /* continue */ }
+
+  const match = content.match(/\[[\s\S]*\]/);
+  if (match) {
+    try {
+      const parsed = JSON.parse(match[0]);
+      if (Array.isArray(parsed)) return parsed;
+    } catch { /* continue */ }
   }
-  if (lower.includes('сэконом') || lower.includes('сохран')) {
-    return 'Отличный вопрос! Вот 3 способа сэкономить: 1) Готовь дома 3-4 раза в неделю вместо кафе, 2) Используй кэшбэк карты, 3) Планируй крупные покупки заранее.';
-  }
-  if (lower.includes('накоп') || lower.includes('цел')) {
-    return 'Для быстрого накопления используй правило 50/30/20: 50% на необходимое, 30% на желания, 20% на сбережения.';
-  }
-  return 'Я анализирую твои финансы и готов помочь с любым вопросом о бюджете, расходах или накоплениях. Что тебя интересует?';
+  return [];
 }
 
-// ── Category constants ────────────────────────────────────────────────────────
+function extractJsonObject(content: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  } catch { /* continue */ }
+
+  const match = content.match(/\{[\s\S]*\}/);
+  if (match) {
+    try {
+      const parsed = JSON.parse(match[0]);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+    } catch { /* continue */ }
+  }
+  return null;
+}
+
+// ── Category constants and cache ──────────────────────────────────────────────
 
 const VALID_CATEGORY_IDS = new Set([
   'food', 'transport', 'shopping', 'health', 'entertainment',
@@ -112,217 +201,243 @@ const VALID_CATEGORY_IDS = new Set([
   'salary', 'freelance', 'gift', 'investment', 'cashback', 'other_inc',
 ]);
 
-const CATEGORIZE_SYSTEM_PROMPT = `Ты финансовый ассистент. Тебе дан список банковских транзакций в формате JSON.
-Каждая транзакция содержит поля: idx (индекс), description (описание из банка), bankCategory (категория банка), type (expense/income), amount (сумма в рублях).
-Используй ВСЕ поля — description, bankCategory, type и amount — для определения категории.
-Верни ТОЛЬКО JSON массив с полями "idx" и "categoryId".
+const categoryCache = new Map<string, { value: CategorizeResult; expiresAt: number }>();
+const CATEGORY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
-КАТЕГОРИИ РАСХОДОВ (type=expense):
-food — продукты, супермаркет, пятёрочка, магнит, вкусвилл, лента, ашан, дикси, окей, глобус, fix price
-cafe — кофе, кафе, ресторан, бар, столовая, фастфуд, доставка еды, макдоналдс, kfc, бургер, пицца, суши, шаурма, самокат, яндекс еда, delivery
-transport — метро, такси, автобус, электричка, ржд, поезд, бензин, азс, парковка, каршеринг, яндекс такси, uber, ситидрайв, делимобиль, аэроэкспресс
-shopping — одежда, wildberries, ozon, lamoda, aliexpress, amazon, zara, h&m, uniqlo, adidas, nike, мвидео, эльдорадо, dns, ситилинк, икеа, леруа, спортмастер, декатлон, электроника
-health — аптека, лекарства, врач, клиника, больница, стоматолог, лаборатория, инвитро, гемотест, helix, 36.6, горздрав, ригла, оптика
-entertainment — кино, театр, концерт, netflix, spotify, яндекс плюс, apple music, youtube, steam, playstation, xbox, боулинг, музей, парк, кинопоиск, okko, иви
-sport — фитнес, спортзал, gym, бассейн, йога, тренажёр, world class, x-fit, alex fitness
-beauty — салон, маникюр, педикюр, парикмахер, барбер, косметика, л'этуаль, рив гош, золотое яблоко
-home — аренда, жкх, коммунал, квартплата, ипотека, электричество, газ, вода, отопление, интернет, мтс, мегафон, билайн, теле2, ростелеком, ремонт, мебель
-education — курсы, обучение, школа, университет, книги, литрес, skillbox, нетология, coursera, udemy, яндекс практикум, репетитор
-travel — отель, авиабилет, аэропорт, booking, airbnb, туту, aviasales, путешествие, экскурсия, туризм
-other_exp — всё остальное (расход), снятие наличных, банкомат, переводы физлицам без явной цели
+function categorizeCacheKey(input: Pick<CategorizeInput, 'description' | 'type'>): string {
+  return createHash('sha256')
+    .update(`${input.description.trim().toLowerCase()}|${input.type}`)
+    .digest('hex');
+}
 
-КАТЕГОРИИ ДОХОДОВ (type=income):
-salary — зарплата, аванс, оклад, премия, зачисление зарплат
-freelance — фриланс, подработка, гонорар, проект
-gift — подарок, дарение
-investment — ТОЛЬКО реальный инвестиционный доход: дивиденды, купоны по облигациям, проценты по вкладу/депозиту
-cashback — кэшбэк, возврат средств, refund
-other_inc — прочие доходы, переводы от физлиц, пополнения счёта
+function normalizeCategory(category: string | undefined, type: 'expense' | 'income'): string {
+  if (category && VALID_CATEGORY_IDS.has(category)) return category;
+  return type === 'income' ? 'other_inc' : 'other_exp';
+}
 
-ВАЖНЫЕ ПРАВИЛА:
-- Если bankCategory = "Финансовые операции" и type=expense — это скорее всего shopping или other_exp, НЕ investment
-- Если bankCategory = "Переводы" — это other_exp (расход) или other_inc (доход)
-- Пополнение брокерского счёта / ИИС — это other_exp, НЕ investment
-- investment только для ВХОДЯЩИХ дивидендов/процентов (type=income)
+const SINGLE_CATEGORIZE_PROMPT = `Ты финансовый ассистент. Определи категорию одной банковской транзакции.
+Верни ТОЛЬКО JSON объект: {"category":"...","confidence":0.0,"reasoning":"..."}.
 
-ВАЖНО: Верни ТОЛЬКО JSON массив. Никакого текста до или после. Только [...].
-Пример: [{"idx":0,"categoryId":"food"},{"idx":1,"categoryId":"transport"},{"idx":2,"categoryId":"salary"}]`;
+Категории расходов: food, cafe, transport, shopping, health, entertainment, sport, beauty, home, education, travel, other_exp.
+Категории доходов: salary, freelance, gift, investment, cashback, other_inc.
 
-// ── Routes ────────────────────────────────────────────────────────────────────
+Правила:
+- Учитывай description, bankCategory, type и amount.
+- investment только для входящих дивидендов/процентов, не для пополнения брокерского счёта.
+- Если описание пустое, верни other_exp/other_inc с confidence 0.1.
+- confidence от 0 до 1.`;
 
-// POST /ai/categorize — batch categorize transactions (TASK-002 core endpoint)
-app.post('/ai/categorize', async (req: any, reply: any) => {
-  const telegramId = getTelegramId(req.headers.authorization);
-  if (!telegramId) return reply.status(401).send({ error: 'Unauthorized' });
+const BULK_CATEGORIZE_PROMPT = `Ты финансовый ассистент. Тебе дан список банковских транзакций в JSON.
+Каждая транзакция содержит idx, description, bankCategory, type, amount.
+Верни ТОЛЬКО JSON массив: [{"idx":0,"categoryId":"food","confidence":0.95,"reasoning":"..."}].
 
-  if (!checkRateLimit(telegramId)) {
-    return reply.status(429).send({ error: 'Rate limit exceeded. Try again in 1 minute.' });
+Категории расходов: food, cafe, transport, shopping, health, entertainment, sport, beauty, home, education, travel, other_exp.
+Категории доходов: salary, freelance, gift, investment, cashback, other_inc.
+
+Правила:
+- Учитывай сумму и категорию банка.
+- investment только для входящих дивидендов/процентов.
+- Никакого текста до или после JSON.`;
+
+async function categorizeOne(input: CategorizeInput): Promise<CategorizeResult> {
+  if (!input.description?.trim()) {
+    const category = input.type === 'income' ? 'other_inc' : 'other_exp';
+    return { category, categoryId: category, confidence: 0.1, reasoning: 'empty description' };
   }
 
-  const { transactions } = req.body as {
-    transactions: Array<{
-      idx: number;
-      description: string;
-      bankCategory: string;
-      type: 'expense' | 'income';
-      amount: number;
-    }>;
+  const key = categorizeCacheKey(input);
+  const cached = categoryCache.get(key);
+  if (cached && Date.now() < cached.expiresAt) return cached.value;
+
+  const content = await callGroq(
+    [
+      { role: 'system', content: SINGLE_CATEGORIZE_PROMPT },
+      { role: 'user', content: JSON.stringify(input) },
+    ],
+    { temperature: 0.1, maxTokens: 256 }
+  );
+
+  const parsed = extractJsonObject(content);
+  const category = normalizeCategory(String(parsed?.category ?? parsed?.categoryId ?? ''), input.type);
+  const confidence = Math.max(0, Math.min(1, Number(parsed?.confidence ?? 0)));
+  const result: CategorizeResult = {
+    category,
+    categoryId: category,
+    confidence,
+    reasoning: typeof parsed?.reasoning === 'string' ? parsed.reasoning : null,
   };
 
-  if (!Array.isArray(transactions) || transactions.length === 0) {
-    return reply.status(400).send({ error: 'transactions array required' });
+  categoryCache.set(key, { value: result, expiresAt: Date.now() + CATEGORY_CACHE_TTL_MS });
+  return result;
+}
+
+// ── Routes: Categorization ────────────────────────────────────────────────────
+
+// POST /ai/categorize — supports TASK-007 single contract and legacy batch contract.
+app.post('/ai/categorize', async (req: any, reply: any) => {
+  const telegramId = requireAuthAndRateLimit(req, reply);
+  if (!telegramId) return;
+
+  const body = req.body ?? {};
+
+  // Legacy client contract: { transactions: [...] } → { data: [{idx, categoryId}] }
+  if (Array.isArray(body.transactions)) {
+    const inputs = body.transactions as Array<CategorizeInput & { idx: number }>;
+    const results = await Promise.all(inputs.map(async (tx) => {
+      const res = await categorizeOne(tx);
+      return { idx: tx.idx, categoryId: res.categoryId, confidence: res.confidence, reasoning: res.reasoning };
+    }));
+    return reply.send({ data: results });
   }
 
-  // Process in batches of 30
-  const BATCH_SIZE = 30;
-  const results: Array<{ idx: number; categoryId: string }> = [];
+  const input = body as CategorizeInput;
+  if (!input.type || !['expense', 'income'].includes(input.type)) {
+    return reply.status(400).send({ error: 'type must be expense or income' });
+  }
 
-  for (let b = 0; b < transactions.length; b += BATCH_SIZE) {
-    const batch = transactions.slice(b, b + BATCH_SIZE);
-    // Re-index within batch for Groq
-    const payload = batch.map((tx, i) => ({
-      idx: i,
-      description: tx.description,
-      bankCategory: tx.bankCategory,
-      type: tx.type,
-      amount: tx.amount,
-    }));
+  try {
+    const result = await categorizeOne(input);
+    return reply.send(result);
+  } catch (err) {
+    app.log.error('Groq categorize error:', err);
+    return sendGroqError(reply, err);
+  }
+});
 
+// POST /ai/categorize/bulk — TASK-007 bulk contract, up to 50 tx.
+app.post('/ai/categorize/bulk', async (req: any, reply: any) => {
+  const telegramId = requireAuthAndRateLimit(req, reply);
+  if (!telegramId) return;
+
+  const transactions = Array.isArray(req.body?.transactions) ? req.body.transactions as CategorizeInput[] : [];
+  if (transactions.length > 50) return reply.status(400).send({ error: 'Maximum 50 transactions per request' });
+  if (transactions.length === 0) return reply.send({ data: [] });
+
+  const results: Array<{ idx: number; categoryId: string; confidence: number; reasoning: string | null }> = [];
+  const uncached: Array<CategorizeInput & { idx: number; cacheKey: string }> = [];
+
+  transactions.forEach((tx, idx) => {
+    const cacheKey = categorizeCacheKey(tx);
+    const cached = categoryCache.get(cacheKey);
+    if (cached && Date.now() < cached.expiresAt) {
+      results.push({ idx, categoryId: cached.value.categoryId, confidence: cached.value.confidence, reasoning: cached.value.reasoning });
+    } else {
+      uncached.push({ ...tx, idx, cacheKey });
+    }
+  });
+
+  if (uncached.length > 0) {
     try {
+      const payload = uncached.map(({ idx, description, bankCategory, type, amount }) => ({ idx, description, bankCategory, type, amount }));
       const content = await callGroq(
         [
-          { role: 'system', content: CATEGORIZE_SYSTEM_PROMPT },
+          { role: 'system', content: BULK_CATEGORIZE_PROMPT },
           { role: 'user', content: JSON.stringify(payload) },
         ],
         { temperature: 0.1, maxTokens: 1024 }
       );
 
-      let arr: { idx: number; categoryId: string }[] = [];
-      // 3-strategy JSON extraction
-      try {
-        arr = JSON.parse(content);
-      } catch {
-        const match = content.match(/\[[\s\S]*\]/);
-        if (match) {
-          try { arr = JSON.parse(match[0]); } catch { /* skip */ }
-        }
+      const parsed = extractJsonArray(content).filter((x): x is Record<string, unknown> => !!x && typeof x === 'object');
+      for (const item of parsed) {
+        const idx = Number(item.idx);
+        const original = uncached.find((tx) => tx.idx === idx);
+        if (!original) continue;
+        const categoryId = normalizeCategory(String(item.categoryId ?? item.category ?? ''), original.type);
+        const confidence = Math.max(0, Math.min(1, Number(item.confidence ?? 0.7)));
+        const reasoning = typeof item.reasoning === 'string' ? item.reasoning : null;
+        const value: CategorizeResult = { category: categoryId, categoryId, confidence, reasoning };
+        categoryCache.set(original.cacheKey, { value, expiresAt: Date.now() + CATEGORY_CACHE_TTL_MS });
+        results.push({ idx, categoryId, confidence, reasoning });
       }
 
-      for (const item of arr) {
-        if (
-          typeof item.idx === 'number' &&
-          item.idx >= 0 &&
-          item.idx < batch.length &&
-          VALID_CATEGORY_IDS.has(item.categoryId)
-        ) {
-          // Map batch-local idx back to original idx
-          const origIdx = batch[item.idx]!.idx;
-          results.push({ idx: origIdx, categoryId: item.categoryId });
+      // Fallback for any missing items.
+      for (const tx of uncached) {
+        if (!results.some((r) => r.idx === tx.idx)) {
+          const fallback = normalizeCategory(undefined, tx.type);
+          results.push({ idx: tx.idx, categoryId: fallback, confidence: 0, reasoning: null });
         }
       }
     } catch (err) {
-      app.log.error('Groq categorize batch error:', err);
-      // Return partial results — client handles missing entries gracefully
+      app.log.error('Groq bulk categorize error:', err);
+      return sendGroqError(reply, err);
     }
   }
 
-  return reply.send({ data: results });
+  return reply.send({ data: results.sort((a, b) => a.idx - b.idx) });
 });
 
-// POST /ai/chat — send message, get AI response
+// ── Routes: Chat ──────────────────────────────────────────────────────────────
+
+function buildFinancialContextText(context: string | FinancialContext | undefined): string {
+  if (!context) return '';
+  if (typeof context === 'string') return context;
+
+  const parts = [
+    context.monthlyBudget !== undefined ? `Месячный бюджет: ${context.monthlyBudget} ₽` : null,
+    context.spentThisMonth !== undefined ? `Потрачено в этом месяце: ${context.spentThisMonth} ₽` : null,
+    context.safeToSpend !== undefined ? `Можно тратить сегодня: ${context.safeToSpend} ₽` : null,
+    context.topCategories?.length ? `Топ категорий: ${context.topCategories.map((c) => `${c.name}: ${c.amount} ₽`).join(', ')}` : null,
+    context.recentTransactions?.length ? `Последние транзакции: ${context.recentTransactions.slice(-10).map((t) => `${t.description} ${t.amount} ₽`).join('; ')}` : null,
+  ].filter(Boolean);
+
+  return parts.join('\n');
+}
+
 app.post('/ai/chat', async (req: any, reply: any) => {
-  const telegramId = getTelegramId(req.headers.authorization);
-  if (!telegramId) return reply.status(401).send({ error: 'Unauthorized' });
+  const telegramId = requireAuthAndRateLimit(req, reply);
+  if (!telegramId) return;
 
-  if (!checkRateLimit(telegramId)) {
-    return reply.status(429).send({ error: 'Rate limit exceeded. Try again in 1 minute.' });
-  }
-
-  const { message, context, history } = req.body as {
-    message: string;
-    context?: string; // financial context string built on client
+  const { message, messages, context, history } = req.body as {
+    message?: string;
+    messages?: Array<{ role: 'user' | 'assistant'; content: string }>;
+    context?: string | FinancialContext;
     history?: Array<{ role: 'user' | 'assistant'; content: string }>;
   };
 
-  if (!message?.trim()) return reply.status(400).send({ error: 'message required' });
+  const inputMessages = Array.isArray(messages)
+    ? messages.slice(-20)
+    : [ ...(history ?? []).slice(-19), ...(message ? [{ role: 'user' as const, content: message }] : []) ];
 
-  const systemPrompt = `Ты FinWise — персональный финансовый советник в Telegram Mini App. Отвечай на русском языке, кратко и по делу (2-5 предложений). Используй эмодзи для наглядности. Давай конкретные советы на основе данных пользователя. Не повторяй вопрос пользователя.
+  if (inputMessages.length === 0 || !inputMessages.some((m) => m.role === 'user' && m.content?.trim())) {
+    return reply.status(400).send({ error: 'messages or message required' });
+  }
 
-${context ?? ''}`;
+  const contextText = buildFinancialContextText(context);
+  const systemPrompt = `Ты FinWise — персональный финансовый советник в Telegram Mini App.
+Отвечай на русском языке, кратко и по делу (2-5 предложений). Используй конкретные суммы из контекста, если они есть.
 
-  const recentHistory = (history ?? []).slice(-6).map((m) => ({
-    role: m.role,
-    content: m.content,
-  }));
-
-  const messages: GroqMessage[] = [
-    { role: 'system', content: systemPrompt },
-    ...recentHistory,
-    { role: 'user', content: message },
-  ];
+Финансовый контекст пользователя:
+${contextText || 'Контекст не передан.'}`;
 
   try {
-    const response = await callGroq(messages, { temperature: 0.7, maxTokens: 400 });
-    return reply.send({ data: { content: response } });
+    const replyText = await callGroq(
+      [
+        { role: 'system', content: systemPrompt },
+        ...inputMessages.map((m) => ({ role: m.role, content: m.content } satisfies GroqMessage)),
+      ],
+      { temperature: 0.7, maxTokens: 400 }
+    );
+    return reply.send({ reply: replyText, data: { content: replyText } });
   } catch (err) {
     app.log.error('Groq chat error:', err);
-    return reply.status(503).send({ error: 'AI service temporarily unavailable' });
+    return sendGroqError(reply, err);
   }
 });
 
-// POST /ai/parse — parse free text into transactions
-app.post('/ai/parse', async (req: any, reply: any) => {
-  const telegramId = getTelegramId(req.headers.authorization);
-  if (!telegramId) return reply.status(401).send({ error: 'Unauthorized' });
+// ── Routes: Parse ─────────────────────────────────────────────────────────────
 
-  if (!checkRateLimit(telegramId)) {
-    return reply.status(429).send({ error: 'Rate limit exceeded. Try again in 1 minute.' });
-  }
+app.post('/ai/parse', async (req: any, reply: any) => {
+  const telegramId = requireAuthAndRateLimit(req, reply);
+  if (!telegramId) return;
 
   const { text } = req.body as { text: string };
   if (!text?.trim()) return reply.status(400).send({ error: 'text required' });
 
   const PARSE_SYSTEM_PROMPT = `Ты финансовый ассистент. Разбери текст пользователя и верни список финансовых транзакций.
-
-ВАЖНО: Верни ТОЛЬКО JSON массив. Никакого текста до или после. Никаких \`\`\`. Только [...].
-
-Каждый элемент массива — объект:
-- "type": "expense" или "income"
-- "amount": число рублей (только цифры, не умножай ни на что)
-- "categoryId": одна из категорий ниже
-- "description": 1-4 слова на русском
-
-КАТЕГОРИИ РАСХОДОВ:
-food — продукты, еда, магазин, пятёрочка, вкусвилл
-transport — метро, автобус, такси, бензин, парковка
-shopping — одежда, wildberries, ozon, покупки
-health — аптека, лекарства, врач, клиника
-entertainment — кино, netflix, spotify, подписки
-cafe — кофе, кафе, ресторан, обед, ужин, завтрак, перекус
-sport — спортзал, фитнес, бассейн, йога
-beauty — салон, маникюр, косметика
-home — аренда, ЖКХ, коммуналка, интернет, ремонт
-education — курсы, обучение, книги
-travel — отель, авиа, путешествие
-other_exp — всё остальное (расход)
-
-КАТЕГОРИИ ДОХОДОВ:
-salary — зарплата, аванс
-freelance — фриланс, подработка
-gift — подарок
-investment — дивиденды, инвестиции
-cashback — кэшбэк, возврат
-other_inc — всё остальное (доход)
-
-ПРИМЕРЫ:
-Ввод: я с утра попил кофе за 500 потом пообедал за 600
-Вывод: [{"type":"expense","amount":500,"categoryId":"cafe","description":"кофе"},{"type":"expense","amount":600,"categoryId":"cafe","description":"обед"}]
-
-Ввод: купил продукты на 1500 и такси 350
-Вывод: [{"type":"expense","amount":1500,"categoryId":"food","description":"продукты"},{"type":"expense","amount":350,"categoryId":"transport","description":"такси"}]
-
-Ввод: зарплата 80000
-Вывод: [{"type":"income","amount":80000,"categoryId":"salary","description":"зарплата"}]`;
+Верни ТОЛЬКО JSON массив.
+Каждый элемент: {"type":"expense|income","amount":number,"categoryId":"...","description":"..."}.
+Категории расходов: food, transport, shopping, health, entertainment, cafe, sport, beauty, home, education, travel, other_exp.
+Категории доходов: salary, freelance, gift, investment, cashback, other_inc.`;
 
   try {
     const content = await callGroq(
@@ -333,51 +448,13 @@ other_inc — всё остальное (доход)
       { temperature: 0.1, maxTokens: 512 }
     );
 
-    let txArray: unknown[] = [];
-
-    // Strategy 1: entire content is a JSON array
-    if (content.startsWith('[')) {
-      try {
-        const parsed = JSON.parse(content);
-        if (Array.isArray(parsed)) txArray = parsed;
-      } catch { /* fall through */ }
-    }
-
-    // Strategy 2: find [...] anywhere in the content
-    if (txArray.length === 0) {
-      const match = content.match(/\[[\s\S]*\]/);
-      if (match) {
-        try {
-          const parsed = JSON.parse(match[0]);
-          if (Array.isArray(parsed)) txArray = parsed;
-        } catch { /* fall through */ }
-      }
-    }
-
-    // Strategy 3: content is a JSON object wrapping the array
-    if (txArray.length === 0) {
-      try {
-        const parsed = JSON.parse(content);
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          const obj = parsed as Record<string, unknown>;
-          for (const key of ['transactions', 'result', 'items', 'data', 'list']) {
-            if (Array.isArray(obj[key])) { txArray = obj[key] as unknown[]; break; }
-          }
-        }
-      } catch { /* fall through */ }
-    }
-
-    const validCategoryIds = VALID_CATEGORY_IDS;
-    const result = txArray
+    const result = extractJsonArray(content)
       .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
       .map((item) => {
-        const type = item['type'] === 'income' ? 'income' : 'expense';
-        const amount = Number(item['amount']);
-        const rawCatId = String(item['categoryId'] ?? '');
-        const categoryId = validCategoryIds.has(rawCatId)
-          ? rawCatId
-          : type === 'income' ? 'other_inc' : 'other_exp';
-        const description = String(item['description'] ?? '').trim();
+        const type = item.type === 'income' ? 'income' : 'expense';
+        const amount = Number(item.amount);
+        const categoryId = normalizeCategory(String(item.categoryId ?? ''), type);
+        const description = String(item.description ?? '').trim();
         return { type, amount, categoryId, description };
       })
       .filter((tx) => tx.amount > 0);
@@ -385,74 +462,297 @@ other_inc — всё остальное (доход)
     return reply.send({ data: result });
   } catch (err) {
     app.log.error('Groq parse error:', err);
-    return reply.status(503).send({ error: 'AI service temporarily unavailable' });
+    return sendGroqError(reply, err);
   }
 });
 
-// GET /ai/insights — generate spending insights from client-provided data
-app.post('/ai/insights', async (req: any, reply: any) => {
-  const telegramId = getTelegramId(req.headers.authorization);
-  if (!telegramId) return reply.status(401).send({ error: 'Unauthorized' });
+// ── Routes: Insights ─────────────────────────────────────────────────────────
 
-  if (!checkRateLimit(telegramId)) {
-    return reply.status(429).send({ error: 'Rate limit exceeded. Try again in 1 minute.' });
-  }
+const insightsCache = new Map<string, { data: unknown[]; generatedAt: string; expiresAt: number }>();
+const INSIGHTS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
-  const { summary } = req.body as {
-    summary: {
-      income: number;
-      expenses: number;
-      savings: number;
-      savingsRate: number;
-      topCategories: Array<{ name: string; amount: number; percent: number }>;
-    };
-  };
-
-  if (!summary) return reply.status(400).send({ error: 'summary required' });
-
-  const prompt = `Проанализируй финансовые данные пользователя за текущий месяц и дай 2-3 конкретных инсайта.
+function buildInsightsPrompt(summary: any): string {
+  return `Проанализируй финансовые данные пользователя и дай 1-5 персонализированных инсайтов.
+Верни ТОЛЬКО JSON массив объектов: [{"type":"warning|tip|success","text":"..."}].
 
 Данные:
-- Доходы: ${summary.income.toLocaleString('ru-RU')} ₽
-- Расходы: ${summary.expenses.toLocaleString('ru-RU')} ₽
-- Баланс: ${summary.savings.toLocaleString('ru-RU')} ₽
-- Норма сбережений: ${summary.savingsRate}%
-- Топ категории: ${summary.topCategories.map((c) => `${c.name} ${c.amount.toLocaleString('ru-RU')} ₽ (${c.percent}%)`).join(', ')}
+${JSON.stringify(summary, null, 2)}`;
+}
 
-Верни JSON массив из 2-3 объектов: [{"type":"spending_alert"|"saving_tip"|"goal_progress","title":"...","description":"...","priority":"high"|"medium"|"low"}]
-Только JSON, никакого текста.`;
+async function generateInsights(telegramId: string, summary: any): Promise<{ insights: unknown[]; generatedAt: string }> {
+  const cached = insightsCache.get(telegramId);
+  if (cached && Date.now() < cached.expiresAt) {
+    return { insights: cached.data, generatedAt: cached.generatedAt };
+  }
+
+  const content = await callGroq(
+    [{ role: 'user', content: buildInsightsPrompt(summary ?? {}) }],
+    { temperature: 0.5, maxTokens: 512 }
+  );
+
+  let insights = extractJsonArray(content)
+    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+    .map((item) => ({
+      type: String(item.type ?? 'tip'),
+      text: String(item.text ?? item.description ?? item.title ?? '').trim(),
+    }))
+    .filter((item) => item.text)
+    .slice(0, 5);
+
+  if (insights.length === 0) {
+    insights = [{ type: 'tip', text: 'Добавьте больше транзакций, чтобы FinWise смог подготовить персональные инсайты.' }];
+  }
+
+  const generatedAt = new Date().toISOString();
+  insightsCache.set(telegramId, { data: insights, generatedAt, expiresAt: Date.now() + INSIGHTS_CACHE_TTL_MS });
+  return { insights, generatedAt };
+}
+
+app.get('/ai/insights', async (req: any, reply: any) => {
+  const telegramId = requireAuthAndRateLimit(req, reply);
+  if (!telegramId) return;
+
+  try {
+    const result = await generateInsights(telegramId, {});
+    return reply.send(result);
+  } catch (err) {
+    app.log.error('Groq insights error:', err);
+    return sendGroqError(reply, err);
+  }
+});
+
+// Legacy/client-friendly POST /ai/insights with summary in body.
+app.post('/ai/insights', async (req: any, reply: any) => {
+  const telegramId = requireAuthAndRateLimit(req, reply);
+  if (!telegramId) return;
+
+  try {
+    const result = await generateInsights(telegramId, req.body?.summary ?? req.body ?? {});
+    return reply.send({ ...result, data: result.insights });
+  } catch (err) {
+    app.log.error('Groq insights error:', err);
+    return sendGroqError(reply, err);
+  }
+});
+
+// ── Routes: Budget Recommendations (TASK-016) ─────────────────────────────────
+
+app.post('/ai/budget-recommendations', async (req: any, reply: any) => {
+  const telegramId = requireAuthAndRateLimit(req, reply);
+  if (!telegramId) return;
+
+  const { categorySpending, currentBudgets, income } = req.body as {
+    categorySpending?: Array<{ categoryId: string; categoryName: string; amount: number }>;
+    currentBudgets?: Array<{ categoryId: string; limit: number }>;
+    income?: number;
+  };
+
+  if (!categorySpending || categorySpending.length === 0) {
+    return reply.status(400).send({ error: 'categorySpending required' });
+  }
+
+  const prompt = `Ты финансовый советник. Проанализируй расходы пользователя и предложи оптимальные лимиты бюджета.
+
+Доход за месяц: ${income ? `${income} руб.` : 'не указан'}
+
+Текущие расходы по категориям:
+${categorySpending.map((c) => `- ${c.categoryName}: ${c.amount} руб.`).join('\n')}
+
+${currentBudgets && currentBudgets.length > 0 ? `Текущие лимиты:\n${currentBudgets.map((b) => `- ${b.categoryId}: ${b.limit} руб.`).join('\n')}` : 'Лимиты не установлены.'}
+
+Верни ТОЛЬКО JSON массив рекомендаций:
+[{"categoryId":"...","categoryName":"...","recommendedLimit":number,"currentSpend":number,"reason":"...","priority":"high|medium|low"}]
+
+Правила:
+- Рекомендуй лимит = 110-120% от текущих трат (небольшой буфер)
+- Для категорий с явным перерасходом — предложи снижение
+- Приоритет "high" — категории с перерасходом или >30% дохода
+- Максимум 5 рекомендаций, самые важные`;
 
   try {
     const content = await callGroq(
       [{ role: 'user', content: prompt }],
-      { temperature: 0.5, maxTokens: 512 }
+      { temperature: 0.3, maxTokens: 600 }
     );
 
-    let insights: unknown[] = [];
-    try { insights = JSON.parse(content); } catch {
-      const match = content.match(/\[[\s\S]*\]/);
-      if (match) { try { insights = JSON.parse(match[0]); } catch { /* skip */ } }
-    }
+    const recommendations = extractJsonArray(content)
+      .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+      .map((item) => ({
+        categoryId: String(item.categoryId ?? ''),
+        categoryName: String(item.categoryName ?? item.categoryId ?? ''),
+        recommendedLimit: Number(item.recommendedLimit ?? 0),
+        currentSpend: Number(item.currentSpend ?? 0),
+        reason: String(item.reason ?? '').trim(),
+        priority: (['high', 'medium', 'low'].includes(String(item.priority)) ? item.priority : 'medium') as string,
+      }))
+      .filter((r) => r.categoryId && r.recommendedLimit > 0)
+      .slice(0, 5);
 
-    return reply.send({ data: insights });
+    return reply.send({ recommendations, generatedAt: new Date().toISOString() });
   } catch (err) {
-    app.log.error('Groq insights error:', err);
-    return reply.status(503).send({ error: 'AI service temporarily unavailable' });
+    app.log.error('Budget recommendations error:', err);
+    return sendGroqError(reply, err);
   }
 });
 
-// Health check
+// ── Routes: Goal Plan (TASK-018) ──────────────────────────────────────────────
+
+app.post('/ai/goal-plan', async (req: any, reply: any) => {
+  const telegramId = requireAuthAndRateLimit(req, reply);
+  if (!telegramId) return;
+
+  const { goal, monthlyIncome, monthlyExpenses } = req.body as {
+    goal?: { name: string; targetAmount: number; currentAmount: number; deadline?: string };
+    monthlyIncome?: number;
+    monthlyExpenses?: number;
+  };
+
+  if (!goal) {
+    return reply.status(400).send({ error: 'goal required' });
+  }
+
+  const remaining = goal.targetAmount - goal.currentAmount;
+  const monthlySavings = monthlyIncome && monthlyExpenses ? monthlyIncome - monthlyExpenses : null;
+  const deadlineDate = goal.deadline ? new Date(goal.deadline) : null;
+  const monthsLeft = deadlineDate
+    ? Math.max(1, Math.ceil((deadlineDate.getTime() - Date.now()) / (30 * 24 * 60 * 60 * 1000)))
+    : null;
+
+  const prompt = `Ты финансовый советник. Составь план достижения финансовой цели.
+
+Цель: ${goal.name}
+Целевая сумма: ${goal.targetAmount} руб.
+Накоплено: ${goal.currentAmount} руб.
+Осталось накопить: ${remaining} руб.
+${goal.deadline ? `Дедлайн: ${goal.deadline} (осталось ~${monthsLeft} мес.)` : ''}
+${monthlySavings !== null ? `Свободные средства в месяц: ~${monthlySavings} руб.` : ''}
+${monthlyIncome ? `Доход: ${monthlyIncome} руб./мес.` : ''}
+${monthlyExpenses ? `Расходы: ${monthlyExpenses} руб./мес.` : ''}
+
+Верни ТОЛЬКО JSON объект:
+{
+  "monthlyRequired": number,
+  "estimatedMonths": number,
+  "feasible": boolean,
+  "recommendations": [
+    {"title":"...","description":"...","impact":number,"type":"save|earn|cut"}
+  ],
+  "summary": "краткое резюме плана"
+}
+
+Правила:
+- monthlyRequired = сколько нужно откладывать в месяц
+- estimatedMonths = при текущем темпе сколько месяцев
+- feasible = реально ли достичь цели к дедлайну
+- 3-4 конкретные рекомендации с impact в рублях
+- summary — 1-2 предложения на русском`;
+
+  try {
+    const content = await callGroq(
+      [{ role: 'user', content: prompt }],
+      { temperature: 0.4, maxTokens: 700 }
+    );
+
+    const plan = extractJsonObject(content);
+    if (!plan) {
+      return reply.status(500).send({ error: 'Failed to generate plan' });
+    }
+
+    return reply.send({
+      monthlyRequired: Number(plan.monthlyRequired ?? 0),
+      estimatedMonths: Number(plan.estimatedMonths ?? 0),
+      feasible: Boolean(plan.feasible ?? true),
+      recommendations: Array.isArray(plan.recommendations) ? plan.recommendations.slice(0, 4) : [],
+      summary: String(plan.summary ?? '').trim(),
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    app.log.error('Goal plan error:', err);
+    return sendGroqError(reply, err);
+  }
+});
+
+// ── Routes: Weekly Summary (TASK-019) ─────────────────────────────────────────
+
+app.post('/ai/weekly-summary', async (req: any, reply: any) => {
+  // This endpoint is called by notification-service — auth via internal secret
+  const internalSecret = req.headers['x-internal-secret'];
+  if (internalSecret !== (process.env.INTERNAL_SECRET ?? 'finwise-internal')) {
+    return reply.status(401).send({ error: 'Unauthorized' });
+  }
+
+  const { telegramId, weeklyData } = req.body as {
+    telegramId: string;
+    weeklyData: {
+      totalExpenses: number;
+      totalIncome: number;
+      topCategories: Array<{ name: string; amount: number }>;
+      transactionCount: number;
+      previousWeekExpenses?: number;
+    };
+  };
+
+  if (!telegramId || !weeklyData) {
+    return reply.status(400).send({ error: 'telegramId and weeklyData required' });
+  }
+
+  const changeVsLastWeek = weeklyData.previousWeekExpenses
+    ? ((weeklyData.totalExpenses - weeklyData.previousWeekExpenses) / weeklyData.previousWeekExpenses) * 100
+    : null;
+
+  const prompt = `Составь краткий еженедельный финансовый отчёт для пользователя Telegram.
+
+Данные за неделю:
+- Расходы: ${weeklyData.totalExpenses} руб.
+- Доходы: ${weeklyData.totalIncome} руб.
+- Транзакций: ${weeklyData.transactionCount}
+- Топ категории: ${weeklyData.topCategories.map((c) => `${c.name}: ${c.amount} руб.`).join(', ')}
+${changeVsLastWeek !== null ? `- Изменение vs прошлая неделя: ${changeVsLastWeek > 0 ? '+' : ''}${changeVsLastWeek.toFixed(0)}%` : ''}
+
+Верни ТОЛЬКО JSON:
+{
+  "message": "текст сообщения для Telegram (с эмодзи, 3-5 строк)",
+  "insight": "главный инсайт недели (1 предложение)",
+  "tip": "совет на следующую неделю (1 предложение)"
+}`;
+
+  try {
+    const content = await callGroq(
+      [{ role: 'user', content: prompt }],
+      { temperature: 0.6, maxTokens: 400 }
+    );
+
+    const result = extractJsonObject(content);
+    if (!result) {
+      // Fallback plain text
+      const fallback = `📊 *Итоги недели*\n\nРасходы: ${weeklyData.totalExpenses} руб.\nДоходы: ${weeklyData.totalIncome} руб.\nТранзакций: ${weeklyData.transactionCount}`;
+      return reply.send({ message: fallback, insight: '', tip: '' });
+    }
+
+    return reply.send({
+      message: String(result.message ?? '').trim(),
+      insight: String(result.insight ?? '').trim(),
+      tip: String(result.tip ?? '').trim(),
+    });
+  } catch (err) {
+    app.log.error('Weekly summary error:', err);
+    return sendGroqError(reply, err);
+  }
+});
+
+// ── Health ────────────────────────────────────────────────────────────────────
+
 app.get('/health', async (_req: any, reply: any) => {
-  return reply.send({ status: 'ok', groqConfigured: !!GROQ_API_KEY });
+  return reply.send({ status: 'ok', service: 'ai-service', groqConfigured: true });
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-const PORT = parseInt(process.env.AI_SERVICE_PORT ?? '3003');
+const PORT = parseInt(process.env.AI_SERVICE_PORT ?? '3003', 10);
 
 try {
   await app.listen({ port: PORT, host: '0.0.0.0' });
-  console.log(`AI service running on port ${PORT} (Groq: ${GROQ_API_KEY ? 'configured' : 'mock mode'})`);
+  console.log(`[ai-service] Running on port ${PORT} with Groq model ${GROQ_MODEL}`);
 } catch (err) {
   app.log.error(err);
   process.exit(1);

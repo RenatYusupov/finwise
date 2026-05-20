@@ -7,6 +7,7 @@ import { PrismaClient } from '@finwise/db-schema';
 // ── Startup validation ────────────────────────────────────────────────────────
 
 const JWT_SECRET = process.env.JWT_SECRET ?? '';
+const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL ?? 'http://localhost:3004';
 if (!JWT_SECRET) {
   console.error('[finance-service] FATAL: JWT_SECRET environment variable is required');
   process.exit(1);
@@ -42,6 +43,62 @@ async function getTelegramId(req: any, reply: any): Promise<bigint | null> {
   } catch {
     reply.status(401).send({ error: 'Invalid or expired token' });
     return null;
+  }
+}
+
+// ── Notification helper ───────────────────────────────────────────────────────
+
+async function maybeSendBudgetAlert(telegramId: bigint, category: string): Promise<void> {
+  try {
+    const budgets = await prisma.finBudget.findMany({ where: { telegramId, category } });
+    if (budgets.length === 0) return;
+
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+
+    const aggregate = await prisma.finTransaction.aggregate({
+      where: {
+        telegramId,
+        category,
+        type: 'expense',
+        date: { gte: monthStart, lte: monthEnd },
+      },
+      _sum: { amount: true },
+    });
+
+    const spent = aggregate._sum.amount ?? 0;
+    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+    for (const budget of budgets) {
+      const percentage = budget.limit > 0 ? Math.round((spent / budget.limit) * 100) : 0;
+      if (percentage < 80) continue;
+
+      const threshold = percentage >= 100 ? 100 : 80;
+      if (threshold === 80 && budget.notified80Month === monthKey) continue;
+      if (threshold === 100 && budget.notified100Month === monthKey) continue;
+
+      await fetch(`${NOTIFICATION_SERVICE_URL}/notify/budget-alert`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          telegramId: telegramId.toString(),
+          categoryName: category,
+          spent,
+          limit: budget.limit,
+          percentage: threshold,
+        }),
+      }).catch(() => {});
+
+      await prisma.finBudget.update({
+        where: { id: budget.id },
+        data: threshold === 100
+          ? { notified100Month: monthKey }
+          : { notified80Month: monthKey },
+      }).catch(() => {});
+    }
+  } catch (err) {
+    app.log.warn({ err, telegramId: telegramId.toString(), category }, 'Budget alert check failed');
   }
 }
 
@@ -111,6 +168,10 @@ app.post('/transactions', async (req: any, reply: any) => {
       requiresUserInput: requiresUserInput ?? false,
     },
   });
+
+  if (tx.type === 'expense') {
+    void maybeSendBudgetAlert(telegramId, tx.category);
+  }
 
   return reply.status(201).send({ data: tx });
 });
@@ -414,6 +475,75 @@ app.delete('/recurring-payments/:id', async (req: any, reply: any) => {
 // ── Sync ──────────────────────────────────────────────────────────────────────
 
 // GET /sync — return all user data in one request
+// ── Routes: Export (TASK-021) ─────────────────────────────────────────────────
+
+app.get('/export', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
+
+  const format = (req.query as any)?.format ?? 'json';
+
+  try {
+    const [transactions, goals, budgets, recurringPayments] = await Promise.all([
+      prisma.finTransaction.findMany({ where: { telegramId }, orderBy: { date: 'desc' } }),
+      prisma.finGoal.findMany({ where: { telegramId } }),
+      prisma.finBudget.findMany({ where: { telegramId } }),
+      prisma.finRecurringPayment.findMany({ where: { telegramId } }),
+    ]);
+
+    const exportData = {
+      exportedAt: new Date().toISOString(),
+      telegramId: telegramId.toString(),
+      transactions: transactions.map((t) => ({
+        id: t.id,
+        date: t.date,
+        type: t.type,
+        amount: Number(t.amount),
+        categoryId: t.categoryId,
+        description: t.description,
+      })),
+      goals: goals.map((g) => ({
+        id: g.id,
+        name: g.name,
+        targetAmount: Number(g.targetAmount),
+        currentAmount: Number(g.currentAmount),
+        deadline: g.deadline,
+      })),
+      budgets: budgets.map((b) => ({
+        id: b.id,
+        categoryId: b.categoryId,
+        limit: Number(b.limit),
+        period: b.period,
+      })),
+      recurringPayments: recurringPayments.map((p) => ({
+        id: p.id,
+        label: p.label,
+        amount: Number(p.amount),
+        frequency: p.frequency,
+        nextDate: p.nextDate,
+      })),
+    };
+
+    if (format === 'csv') {
+      const headers = ['date', 'type', 'amount', 'categoryId', 'description'];
+      const rows = exportData.transactions.map((t) =>
+        [t.date, t.type, t.amount, t.categoryId, `"${(t.description ?? '').replace(/"/g, '""')}"`].join(',')
+      );
+      const csv = [headers.join(','), ...rows].join('\n');
+      reply.header('Content-Type', 'text/csv');
+      reply.header('Content-Disposition', `attachment; filename="finwise_export_${new Date().toISOString().slice(0, 10)}.csv"`);
+      return reply.send('\uFEFF' + csv);
+    }
+
+    reply.header('Content-Type', 'application/json');
+    reply.header('Content-Disposition', `attachment; filename="finwise_export_${new Date().toISOString().slice(0, 10)}.json"`);
+    return reply.send(exportData);
+  } catch (err) {
+    app.log.error({ err }, 'Export failed');
+    return reply.status(500).send({ error: 'Export failed' });
+  }
+});
+
 app.get('/sync', async (req: any, reply: any) => {
   const telegramId = await getTelegramId(req, reply);
   if (!telegramId) return;

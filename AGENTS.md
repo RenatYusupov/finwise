@@ -36,7 +36,6 @@ finwise/
 4. Задачи (ТЗ, валидация, отчёты) → только в `docs/tasks/`
 5. Не дублировать спецификации — один источник правды: PRODUCT_SPEC.md и ALGORITHM_SPEC.md
 6. Перед началом работы прочитать PRODUCT_SPEC.md и ALGORITHM_SPEC.md
-7. **Developer: после завершения реализации обязательно выполнить git commit + git push** (см. раздел Git Workflow ниже)
 
 ---
 

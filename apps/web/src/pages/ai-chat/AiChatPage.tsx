@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useFinanceStore } from '@/features/finance/store';
 import { generateAiResponse } from '@/features/ai/smartResponses';
@@ -39,21 +39,77 @@ ${topCategories ? `- Топ категории расходов: ${topCategories
 ${activeGoals ? `- Активные цели: ${activeGoals}` : '- Целей пока нет'}`;
 }
 
+// ─── Action Cards (TASK-017) ──────────────────────────────────────────────────
+
+export interface ChatAction {
+  type: 'add_transaction' | 'set_budget' | 'add_goal' | 'view_analytics' | 'view_budget' | 'view_goals';
+  label: string;
+  icon: string;
+  payload?: Record<string, unknown>;
+}
+
+function ActionCard({ action, onExecute }: { action: ChatAction; onExecute: (a: ChatAction) => void }) {
+  const bgMap: Record<string, string> = {
+    add_transaction: 'linear-gradient(135deg, #00C896, #00A878)',
+    set_budget: 'linear-gradient(135deg, #FFB800, #FF9500)',
+    add_goal: 'linear-gradient(135deg, #6C63FF, #8B5CF6)',
+    view_analytics: 'linear-gradient(135deg, #3B82F6, #2563EB)',
+    view_budget: 'linear-gradient(135deg, #F59E0B, #D97706)',
+    view_goals: 'linear-gradient(135deg, #8B5CF6, #7C3AED)',
+  };
+  return (
+    <motion.button
+      initial={{ opacity: 0, scale: 0.9 }}
+      animate={{ opacity: 1, scale: 1 }}
+      whileTap={{ scale: 0.95 }}
+      onClick={() => onExecute(action)}
+      className="flex items-center gap-2 px-3 py-2 rounded-xl text-white text-xs font-semibold haptic shadow-sm"
+      style={{ background: bgMap[action.type] ?? 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}
+    >
+      <span className="text-sm">{action.icon}</span>
+      <span>{action.label}</span>
+    </motion.button>
+  );
+}
+
+// Parse actions from AI response text
+function parseActionsFromResponse(text: string): ChatAction[] {
+  const actions: ChatAction[] = [];
+  const lower = text.toLowerCase();
+
+  if (lower.includes('добав') && (lower.includes('трат') || lower.includes('расход') || lower.includes('транзакц'))) {
+    actions.push({ type: 'add_transaction', label: 'Добавить трату', icon: '➕' });
+  }
+  if (lower.includes('бюджет') || lower.includes('лимит')) {
+    actions.push({ type: 'view_budget', label: 'Открыть бюджет', icon: '📋' });
+  }
+  if (lower.includes('цел') || lower.includes('накопи')) {
+    actions.push({ type: 'view_goals', label: 'Мои цели', icon: '🎯' });
+  }
+  if (lower.includes('аналитик') || lower.includes('статистик') || lower.includes('расход')) {
+    actions.push({ type: 'view_analytics', label: 'Аналитика', icon: '📊' });
+  }
+
+  return actions.slice(0, 3);
+}
+
 async function askGroqChat(
   userMessage: string,
   financialContext: string,
   history: { role: 'user' | 'assistant'; content: string }[]
-): Promise<string | null> {
-  // Keep last 6 messages for context (3 exchanges)
+): Promise<{ reply: string; actions?: ChatAction[] } | null> {
   const recentHistory = history.slice(-6);
 
   try {
-    const response = await apiClient.post<{ data: { content: string } }>('/ai/chat', {
+    const response = await apiClient.post<{ reply?: string; data?: { content: string }; actions?: ChatAction[] }>('/ai/chat', {
       message: userMessage,
       context: financialContext,
       history: recentHistory,
     });
-    return response.data?.data?.content || null;
+    const replyText = response.data?.reply || response.data?.data?.content || null;
+    if (!replyText) return null;
+    const actions = response.data?.actions ?? parseActionsFromResponse(replyText);
+    return { reply: replyText, actions };
   } catch (err) {
     console.error('[AiChat] Backend chat error:', err);
     return null;
@@ -81,22 +137,15 @@ const isTelegramWebView =
 function useVoiceInput(onResult: (text: string) => void) {
   const [isListening, setIsListening] = useState(false);
   const [voiceText, setVoiceText] = useState('');
-  const [voiceBlocked, setVoiceBlocked] = useState(false);
   const [voiceError, setVoiceError] = useState('');
   const recognitionRef = useRef<any>(null);
 
-  const hasSpeechAPI =
+  const supported =
     typeof window !== 'undefined' &&
-    (!!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition);
-
-  // In Telegram WebView, SpeechRecognition always fails — hide proactively
-  const supported = hasSpeechAPI && !voiceBlocked && !isTelegramWebView;
+    ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
 
   const toggle = useCallback(() => {
-    const SpeechRecognition =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-
-    if (!SpeechRecognition) {
+    if (!supported) {
       setVoiceError('Голосовой ввод не поддерживается');
       setTimeout(() => setVoiceError(''), 3000);
       return;
@@ -105,70 +154,50 @@ function useVoiceInput(onResult: (text: string) => void) {
     if (isListening) {
       recognitionRef.current?.stop();
       setIsListening(false);
-      setVoiceText('');
       return;
     }
 
-    setVoiceError('');
-
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     const recognition = new SpeechRecognition();
-    recognitionRef.current = recognition;
     recognition.lang = 'ru-RU';
     recognition.continuous = false;
     recognition.interimResults = true;
-    recognition.maxAlternatives = 1;
+    recognitionRef.current = recognition;
 
-    recognition.onstart = () => setIsListening(true);
+    recognition.onstart = () => {
+      setIsListening(true);
+      setVoiceText('');
+      setVoiceError('');
+    };
 
     recognition.onresult = (event: any) => {
-      const transcript = Array.from(event.results)
+      const transcript = Array.from(event.results as any[])
         .map((r: any) => r[0].transcript)
         .join('');
       setVoiceText(transcript);
-
-      const lastResult = event.results[event.results.length - 1];
-      if (lastResult?.isFinal) {
+      if (event.results[event.results.length - 1].isFinal) {
         onResult(transcript);
         setVoiceText('');
-        setIsListening(false);
       }
     };
 
     recognition.onerror = (e: any) => {
       setIsListening(false);
       setVoiceText('');
-      if (e.error === 'service-not-allowed' || e.error === 'not-allowed') {
-        setVoiceBlocked(true);
-        setVoiceError('Голосовой ввод недоступен в этом браузере');
-        setTimeout(() => setVoiceError(''), 4000);
-      } else if (e.error === 'no-speech') {
-        setVoiceError('Речь не распознана, попробуйте ещё раз');
-        setTimeout(() => setVoiceError(''), 3000);
-      } else if (e.error === 'audio-capture') {
-        setVoiceError('Микрофон недоступен');
-        setTimeout(() => setVoiceError(''), 3000);
-      } else if (e.error === 'network') {
-        setVoiceError('Нет сети для распознавания речи');
-        setTimeout(() => setVoiceError(''), 3000);
-      } else {
-        setVoiceError('Ошибка голосового ввода');
-        setTimeout(() => setVoiceError(''), 3000);
+      if (e.error === 'not-allowed') {
+        setVoiceError('Нет доступа к микрофону');
+      } else if (e.error !== 'aborted') {
+        setVoiceError('Ошибка распознавания речи');
       }
+      setTimeout(() => setVoiceError(''), 3000);
     };
 
     recognition.onend = () => {
       setIsListening(false);
     };
 
-    try {
-      recognition.start();
-    } catch {
-      setIsListening(false);
-      setVoiceBlocked(true);
-      setVoiceError('Не удалось запустить голосовой ввод');
-      setTimeout(() => setVoiceError(''), 3000);
-    }
-  }, [isListening, onResult]);
+    recognition.start();
+  }, [isListening, onResult, supported]);
 
   useEffect(() => {
     return () => {
@@ -179,9 +208,20 @@ function useVoiceInput(onResult: (text: string) => void) {
   return { isListening, voiceText, voiceError, toggle, supported };
 }
 
-// ─── AiChatPage ───────────────────────────────────────────────────────────────
+// ─── Message type with optional actions ──────────────────────────────────────
+
+interface AiMessageWithActions {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  actions?: ChatAction[];
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
 
 export function AiChatPage() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [isTyping, setIsTyping] = useState(false);
   const [inputHasText, setInputHasText] = useState(false);
   const [groqError, setGroqError] = useState(false);
@@ -191,10 +231,12 @@ export function AiChatPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const inputBarRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
-  const navigate = useNavigate();
 
   const { aiMessages, addAiMessage, clearAiChat, transactions, goals, getMonthSummary, getCategorySpending } =
     useFinanceStore();
+
+  // Local messages with actions (actions are not persisted to store)
+  const [localActions, setLocalActions] = useState<Record<string, ChatAction[]>>({});
 
   const handleSend = useCallback(async (text: string) => {
     const trimmed = text.trim();
@@ -219,19 +261,29 @@ export function AiChatPage() {
 
     // Try Groq first, fall back to local smartResponses
     let response: string;
-    const groqReply = await askGroqChat(trimmed, financialContext, history);
+    let actions: ChatAction[] = [];
+    const groqResult = await askGroqChat(trimmed, financialContext, history);
 
-    if (groqReply) {
-      response = groqReply;
+    if (groqResult) {
+      response = groqResult.reply;
+      actions = groqResult.actions ?? [];
       setGroqError(false);
     } else {
       // Local fallback
       response = generateAiResponse(trimmed, { transactions, goals, summary, categorySpending });
+      actions = parseActionsFromResponse(response);
       setGroqError(true);
       setTimeout(() => setGroqError(false), 4000);
     }
 
+    const msgId = `msg_${Date.now()}`;
     addAiMessage({ role: 'assistant', content: response });
+
+    // Store actions for this message (keyed by approximate timestamp)
+    if (actions.length > 0) {
+      setLocalActions((prev) => ({ ...prev, [msgId]: actions }));
+    }
+
     setIsTyping(false);
   }, [isTyping, addAiMessage, getMonthSummary, getCategorySpending, transactions, goals, aiMessages]);
 
@@ -245,9 +297,41 @@ export function AiChatPage() {
     handleSend(text);
   });
 
+  // Execute action card
+  const handleActionExecute = useCallback((action: ChatAction) => {
+    const tg = (window as any).Telegram?.WebApp;
+    tg?.HapticFeedback?.impactOccurred('light');
+
+    switch (action.type) {
+      case 'add_transaction':
+        navigate('/transactions/add');
+        break;
+      case 'set_budget':
+      case 'view_budget':
+        navigate('/budget');
+        break;
+      case 'add_goal':
+      case 'view_goals':
+        navigate('/goals');
+        break;
+      case 'view_analytics':
+        navigate('/analytics');
+        break;
+    }
+  }, [navigate]);
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [aiMessages, isTyping, voiceText]);
+
+  useEffect(() => {
+    const state = location.state as { prefill?: string } | null;
+    const prefill = state?.prefill?.trim();
+    if (!prefill || !inputRef.current) return;
+    inputRef.current.value = prefill;
+    setInputHasText(true);
+    setTimeout(() => inputRef.current?.focus(), 120);
+  }, [location.state]);
 
   useEffect(() => {
     if (aiMessages.length === 0) {
@@ -263,33 +347,22 @@ export function AiChatPage() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // VisualViewport — position input bar at the top of the keyboard.
-  // CSS env(keyboard-inset-height) handles it natively on iOS 15+ / Chrome 94+.
-  // JS visualViewport is a fallback for older Telegram WebView versions.
   useEffect(() => {
     const vv = window.visualViewport;
     if (!vv) return;
 
     const update = () => {
       if (!inputBarRef.current) return;
-      // Distance from bottom of visual viewport to bottom of layout viewport
-      const offsetBottom = window.innerHeight - (vv.offsetTop + vv.height);
-      const clamped = Math.max(0, offsetBottom);
-      // Only override via JS when CSS env(keyboard-inset-height) is NOT supported
-      // (i.e. when the bar hasn't already moved). We always set it to be safe.
-      inputBarRef.current.style.bottom = `${clamped}px`;
-
-      const isOpen = clamped > 100;
+      const keyboardH = window.innerHeight - vv.height - (vv.offsetTop ?? 0);
+      const isOpen = keyboardH > 100;
       setKeyboardOpen(isOpen);
-      if (isOpen) {
-        // Use requestAnimationFrame to scroll after layout settles
-        requestAnimationFrame(() => {
-          bottomRef.current?.scrollIntoView({ behavior: 'instant' });
-        });
+      if (isOpen && !isTelegramWebView) {
+        inputBarRef.current.style.bottom = `${keyboardH}px`;
+      } else {
+        inputBarRef.current.style.bottom = '';
       }
     };
 
-    // Run immediately and on every viewport change
-    update();
     vv.addEventListener('resize', update);
     vv.addEventListener('scroll', update);
     return () => {
@@ -300,85 +373,85 @@ export function AiChatPage() {
 
   const hasMessages = aiMessages.length > 0;
 
+  // Map messages to include actions for assistant messages
+  const messagesWithActions: AiMessageWithActions[] = aiMessages.map((msg, idx) => {
+    if (msg.role === 'assistant') {
+      // Match actions to the most recent assistant messages by index
+      const assistantIdx = aiMessages.slice(0, idx + 1).filter((m) => m.role === 'assistant').length - 1;
+      const actionKeys = Object.keys(localActions);
+      const matchedKey = actionKeys[assistantIdx];
+      return { ...msg, actions: matchedKey ? localActions[matchedKey] : undefined };
+    }
+    return msg;
+  });
+
   return (
     <div
-      className="flex flex-col flex-1 min-h-0"
-      style={{ background: '#F8F7FF', position: 'relative' }}
-      // Tapping outside input dismisses keyboard immediately
-      onPointerDown={(e) => {
-        if (inputRef.current && !inputRef.current.contains(e.target as Node)) {
-          inputRef.current.blur();
-        }
-      }}
+      className="flex flex-col h-full"
+      style={{ background: 'linear-gradient(180deg, #F8F7FF 0%, #F0EEFF 100%)' }}
     >
       {/* Header */}
-      <div className="flex-shrink-0 px-4 pt-5 pb-4 glass border-b border-white/60">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => navigate('/')}
-              className="w-9 h-9 rounded-2xl flex items-center justify-center haptic text-lg flex-shrink-0"
-              style={{ background: 'rgba(0,0,0,0.06)' }}
-            >
-              ←
-            </button>
-            <motion.div
-              animate={{ scale: [1, 1.05, 1] }}
-              transition={{ repeat: Infinity, duration: 3 }}
-              className="w-11 h-11 rounded-2xl flex items-center justify-center text-2xl shadow-md"
-              style={{ background: 'linear-gradient(135deg, #6C63FF 0%, #9B59B6 100%)' }}
-            >
-              🦉
-            </motion.div>
-            <div>
-              <div className="font-bold text-gray-900">FinWise AI</div>
-              <div className="flex items-center gap-1.5">
-                <motion.div
-                  animate={{ opacity: [1, 0.4, 1] }}
-                  transition={{ repeat: Infinity, duration: 1.5 }}
-                  className="w-1.5 h-1.5 rounded-full bg-green-500"
-                />
-                <span className="text-xs text-green-600 font-medium">Groq Llama 3.1</span>
-              </div>
+      <div
+        className="flex items-center justify-between px-4 pt-5 pb-3 border-b border-white/60"
+        style={{ background: 'rgba(255,255,255,0.8)', backdropFilter: 'blur(12px)' }}
+        onPointerDown={(e) => {
+          // Prevent scroll-to-top on header tap (Telegram WebView quirk)
+          e.stopPropagation();
+        }}
+      >
+        <div className="flex items-center gap-3">
+          <div
+            className="w-10 h-10 rounded-2xl flex items-center justify-center text-xl"
+            style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}
+          >
+            🦉
+          </div>
+          <div>
+            <div className="font-bold text-gray-900 text-base leading-tight">FinWise AI</div>
+            <div className="flex items-center gap-1.5">
+              <motion.div
+                animate={{ scale: [1, 1.3, 1] }}
+                transition={{ repeat: Infinity, duration: 2 }}
+                className="w-1.5 h-1.5 rounded-full bg-green-400"
+              />
+              <span className="text-xs text-gray-400">Онлайн</span>
             </div>
           </div>
-          {hasMessages && (
-            <button
-              onClick={clearAiChat}
-              className="text-xs text-gray-400 px-3 py-1.5 rounded-full haptic"
-              style={{ background: 'rgba(0,0,0,0.05)' }}
-            >
-              Очистить
-            </button>
-          )}
         </div>
+        {hasMessages && (
+          <button
+            onClick={clearAiChat}
+            className="text-xs text-gray-400 haptic px-3 py-1.5 rounded-xl"
+            style={{ background: 'rgba(108,99,255,0.08)' }}
+          >
+            Очистить
+          </button>
+        )}
       </div>
 
-      {/* Messages area — scrollable; padding-bottom reserves space for fixed input bar */}
+      {/* Messages */}
       <div
         ref={messagesRef}
-        className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-4"
-        style={{ paddingBottom: keyboardOpen ? '80px' : '80px' }}
+        className="flex-1 overflow-y-auto px-4 py-4 space-y-4"
+        style={{ paddingBottom: '80px' }}
       >
-        {/* Empty state */}
+        {/* Welcome screen */}
         {!hasMessages && !isTyping && (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            className="pt-4"
+            transition={{ delay: 0.2 }}
           >
             <div className="text-center mb-6">
               <motion.div
-                animate={{ y: [0, -6, 0] }}
-                transition={{ repeat: Infinity, duration: 3 }}
+                animate={{ rotate: [0, 5, -5, 0] }}
+                transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
                 className="text-6xl mb-3"
               >
                 🦉
               </motion.div>
-              <div className="font-bold text-gray-800 text-lg mb-1">Чем могу помочь?</div>
-              <div className="text-sm text-gray-500">
-                {voiceSupported ? 'Задай вопрос или нажми 🎤' : 'Задай вопрос текстом'}
-              </div>
+              <div className="font-bold text-gray-800 text-lg mb-1">Привет! Я FinWise AI</div>
+              <div className="text-sm text-gray-500">Задай любой вопрос о финансах</div>
             </div>
             <div className="grid grid-cols-2 gap-2">
               {QUICK_PROMPTS.map((prompt, i) => (
@@ -386,7 +459,8 @@ export function AiChatPage() {
                   key={prompt.text}
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: i * 0.07 }}
+                  transition={{ delay: 0.1 + i * 0.05 }}
+                  whileTap={{ scale: 0.97 }}
                   onClick={() => handleSend(prompt.text)}
                   className="flex items-center gap-2 bg-white rounded-2xl px-3 py-3 text-sm text-gray-700 haptic text-left shadow-sm border border-gray-100"
                 >
@@ -399,7 +473,7 @@ export function AiChatPage() {
         )}
 
         <AnimatePresence initial={false}>
-          {aiMessages.map((msg) => (
+          {messagesWithActions.map((msg) => (
             <motion.div
               key={msg.id}
               initial={{ opacity: 0, y: 12, scale: 0.97 }}
@@ -413,16 +487,26 @@ export function AiChatPage() {
                   🦉
                 </div>
               )}
-              <div
-                className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm whitespace-pre-line leading-relaxed ${
-                  msg.role === 'user' ? 'rounded-br-sm' : 'rounded-bl-sm shadow-sm'
-                }`}
-                style={msg.role === 'user'
-                  ? { background: 'linear-gradient(135deg, #6C63FF, #9B59B6)', color: 'white' }
-                  : { background: '#FFFFFF', color: '#1a1a2e', border: '1px solid rgba(108,99,255,0.08)' }
-                }
-              >
-                {msg.content}
+              <div className="flex flex-col gap-2 max-w-[80%]">
+                <div
+                  className={`rounded-2xl px-4 py-3 text-sm whitespace-pre-line leading-relaxed ${
+                    msg.role === 'user' ? 'rounded-br-sm' : 'rounded-bl-sm shadow-sm'
+                  }`}
+                  style={msg.role === 'user'
+                    ? { background: 'linear-gradient(135deg, #6C63FF, #9B59B6)', color: 'white' }
+                    : { background: '#FFFFFF', color: '#1a1a2e', border: '1px solid rgba(108,99,255,0.08)' }
+                  }
+                >
+                  {msg.content}
+                </div>
+                {/* Action cards (TASK-017) */}
+                {msg.role === 'assistant' && msg.actions && msg.actions.length > 0 && (
+                  <div className="flex flex-wrap gap-2 pl-0">
+                    {msg.actions.map((action, i) => (
+                      <ActionCard key={i} action={action} onExecute={handleActionExecute} />
+                    ))}
+                  </div>
+                )}
               </div>
             </motion.div>
           ))}
@@ -505,15 +589,12 @@ export function AiChatPage() {
           position: 'fixed',
           left: 0,
           right: 0,
-          // Primary: CSS env(keyboard-inset-height) — zero-lag, no JS needed on modern iOS
-          // Fallback: safe-area-inset-bottom for notched devices without keyboard API
           bottom: `env(keyboard-inset-height, env(safe-area-inset-bottom, 0px))`,
           zIndex: 50,
           paddingLeft: '16px',
           paddingRight: '16px',
           paddingTop: '12px',
           paddingBottom: '12px',
-          // Smooth transition only when keyboard is closing (avoids lag on open)
           transition: 'bottom 0.0s',
         }}
       >
@@ -608,7 +689,6 @@ export function AiChatPage() {
                 }
               }}
               onFocus={() => {
-                // Scroll to bottom after keyboard animation (~300ms)
                 setTimeout(() => {
                   bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
                 }, 300);
@@ -620,11 +700,10 @@ export function AiChatPage() {
                 WebkitAppearance: 'none',
                 appearance: 'none',
                 border: 'none',
-                fontSize: '16px', // Prevents iOS zoom on focus
+                fontSize: '16px',
                 lineHeight: '1.4',
                 caretColor: '#6C63FF',
               }}
-              // Enable standard text editing features (autocorrect, spellcheck, autocomplete)
               autoComplete="on"
               autoCorrect="on"
               autoCapitalize="sentences"
