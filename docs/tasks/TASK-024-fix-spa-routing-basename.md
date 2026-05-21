@@ -1,6 +1,6 @@
 # TASK-024: Исправление SPA-роутинга — несоответствие basename и nginx fallback
 
-**Статус:** 📝 Draft  
+**Статус:** ✅ Done
 **Приоритет:** P0  
 **Sprint:** hotfix  
 **Создана:** 2026-05-21  
@@ -104,18 +104,24 @@ const isActive = item.path === '/'
 
 ## 💻 Отчёт разработчика (заполняет Developer)
 
-**Статус реализации:** ⬜ Ожидает  
-**Дата завершения:** —  
-**Коммит:** —
+**Статус реализации:** ✅ Done
+**Дата завершения:** 2026-05-21
+**Коммит:** `1fbcd440`
 
 ### Что сделано
-> —
+
+- [`apps/web/vite.config.ts:7`](apps/web/vite.config.ts:7) — изменён `base` с `'/finwise/'` на `'/'`. Assets теперь собираются без sub-path префикса, что соответствует тому, как Telegram Mini App открывает приложение с корня домена.
+- [`apps/web/src/app/App.tsx:29`](apps/web/src/app/App.tsx:29) — убран второй аргумент `{ basename: '/finwise' }` из `createBrowserRouter`. Router теперь работает от корня `/`, все маршруты матчатся корректно.
+- [`apps/web/nginx.conf`](apps/web/nginx.conf) — изменений не потребовалось. `try_files $uri $uri/ /index.html` уже корректен для root-serving.
 
 ### Что НЕ сделано (если есть)
-> —
+
+Вариант B (sub-path deployment) и Вариант C (HashRouter) не реализованы — выбран рекомендованный Вариант A.
 
 ### Риски и известные ограничения
-> —
+
+- Если приложение когда-либо будет развёрнуто по sub-path (не на корне домена), потребуется вернуть `base` и `basename` и обновить nginx. Инварианты задокументированы в [`ARCHITECTURE.md`](ARCHITECTURE.md).
+- После изменения `base` в vite необходима пересборка (`pnpm build`) — старый dist с `/finwise/` префиксом в asset URL больше не валиден.
 
 ### Тестирование
 
