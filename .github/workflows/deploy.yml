@@ -46,10 +46,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Inject build timestamp into service worker
+      - name: Inject build timestamp into service worker and index.html
         run: |
           BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           sed -i "s/finwise-v3/finwise-${BUILD_TIME}/" apps/web/public/sw.js
+          sed -i "s|<title>FinWise</title>|<title>FinWise</title>\n    <meta name=\"build\" content=\"${BUILD_TIME}\" />|" apps/web/index.html
 
       - name: Build web app
         run: pnpm --filter @finwise/web build

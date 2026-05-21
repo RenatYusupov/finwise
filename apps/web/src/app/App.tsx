@@ -1,4 +1,4 @@
-import { useEffect, Component, type ReactNode } from 'react';
+import { useEffect, useRef, Component, type ReactNode } from 'react';
 import { HashRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AppLayout } from './AppLayout';
@@ -34,15 +34,16 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
     this.state = { error: null };
   }
   static getDerivedStateFromError(error: Error) { return { error }; }
+  componentDidCatch(error: Error) {
+    console.error('[FinWise ErrorBoundary]', error);
+  }
   render() {
     if (this.state.error) {
       return (
-        <div style={{ padding: 24, color: '#333' }}>
-          <h2>Что-то пошло не так</h2>
-          <pre style={{ fontSize: 12, whiteSpace: 'pre-wrap', color: '#c00' }}>
+        <div style={{ padding: 24, color: '#333', fontFamily: 'sans-serif' }}>
+          <h2 style={{ color: '#c00' }}>Ошибка рендера</h2>
+          <pre style={{ fontSize: 11, whiteSpace: 'pre-wrap', color: '#c00', background: '#fff0f0', padding: 12, borderRadius: 8 }}>
             {this.state.error.message}
-            {'\n'}
-            {this.state.error.stack}
           </pre>
         </div>
       );
@@ -55,15 +56,19 @@ function AppRoutes() {
   const { onboardingCompleted } = useAuthStore();
   const navigate = useNavigate();
   const location = useLocation();
+  const tgInitDone = useRef(false);
 
+  // One-time Telegram WebApp initialization — runs only once on mount
   useEffect(() => {
-    // Initialize Telegram WebApp if available
+    if (tgInitDone.current) return;
+    tgInitDone.current = true;
+
     if (window.Telegram?.WebApp) {
       window.Telegram.WebApp.ready();
       window.Telegram.WebApp.expand();
 
-      // After WebApp.ready(), CloudStorage is guaranteed available.
-      // Rehydrate: read cloud → merge with local → update store.
+      // Rehydrate from CloudStorage after WebApp.ready()
+      // Use 1500ms delay — Telegram Desktop bridge can take longer to expose CloudStorage
       let retryTimer: ReturnType<typeof setTimeout> | null = null;
       const timer = setTimeout(() => {
         rehydrateFromCloud().catch(() => {/* ignore */});
@@ -72,10 +77,10 @@ function AppRoutes() {
         }, 1500);
       }, 1500);
 
+      // Re-sync when Mini App is re-activated
       const handleActivated = async () => {
         await rehydrateFromCloud().catch(() => {/* ignore */});
       };
-
       window.Telegram.WebApp.onEvent('activated', handleActivated);
 
       return () => {
@@ -84,8 +89,12 @@ function AppRoutes() {
         window.Telegram?.WebApp?.offEvent('activated', handleActivated);
       };
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // intentionally empty — one-time init only
 
-    // Redirect to onboarding if not completed (browser-only, not in Telegram)
+  // Separate effect for onboarding redirect (browser-only, not in Telegram)
+  useEffect(() => {
+    if (window.Telegram?.WebApp) return; // Telegram handles its own flow
     if (!onboardingCompleted && location.pathname !== '/onboarding') {
       navigate('/onboarding');
     }
