@@ -15,6 +15,8 @@
 | [`apps/web/vite.config.ts`](apps/web/vite.config.ts) | `base` | `'/'` | Префикс URL для всех собранных assets (JS, CSS, images) |
 | [`apps/web/src/app/App.tsx`](apps/web/src/app/App.tsx) | `basename` в `createBrowserRouter` | *(не задан — корень)* | Префикс, который React Router вырезает из `location.pathname` |
 | [`apps/web/nginx.conf`](apps/web/nginx.conf) | `try_files` fallback | `try_files $uri $uri/ /index.html` | Какой `index.html` отдаётся при 404 (SPA fallback) |
+| [`apps/web/src/main.tsx`](apps/web/src/main.tsx) | SW `register` path + `scope` | `'/sw.js'`, `scope: '/'` | Service Worker регистрируется на корне — должен совпадать с `base` |
+| [`apps/web/public/sw.js`](apps/web/public/sw.js) | `CACHE_NAME` | `'finwise-v2'` | При смене `base` — обязательно инкрементировать версию кэша |
 
 ### Правило: `vite base` = nginx serving path = router `basename`
 
