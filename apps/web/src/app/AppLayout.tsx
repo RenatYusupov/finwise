@@ -22,7 +22,7 @@ export function AppLayout() {
 
   return (
     <div className="flex flex-col h-full" style={{ background: 'var(--bg-warm)' }}>
-      {/* Main content area — AnimatePresence removed for debug (TASK-033) */}
+      {/* Main content area — no AnimatePresence wrapper (causes opacity:0 stuck on iOS Telegram, TASK-033) */}
       <main
         className={mainClass}
         style={{
