@@ -1,5 +1,5 @@
-import { useEffect } from 'react';
-import { RouterProvider, createBrowserRouter } from 'react-router-dom';
+import { useEffect, Component, type ReactNode } from 'react';
+import { HashRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AppLayout } from './AppLayout';
 import { OnboardingPage } from '@/pages/onboarding/OnboardingPage';
@@ -26,35 +26,35 @@ const queryClient = new QueryClient({
   },
 });
 
-const router = createBrowserRouter(
-  [
-    {
-      path: '/onboarding',
-      element: <OnboardingPage />,
-    },
-    {
-      path: '/',
-      element: <AppLayout />,
-      children: [
-        { index: true, element: <DashboardPage /> },
-        { path: 'transactions', element: <TransactionsPage /> },
-        { path: 'transactions/add', element: <AddTransactionPage /> },
-        { path: 'analytics', element: <AnalyticsPage /> },
-        { path: 'analytics/category/:categoryId', element: <CategoryDetailPage /> },
-        { path: 'goals', element: <GoalsPage /> },
-        { path: 'goals/:id', element: <GoalDetailPage /> },
-        { path: 'budget', element: <BudgetPage /> },
-        { path: 'recurring', element: <RecurringPage /> },
-        { path: 'ai', element: <AiChatPage /> },
-        { path: 'profile', element: <ProfilePage /> },
-      ],
-    },
-  ],
-  { basename: '/finwise' }
-);
+// Global error boundary to catch silent render crashes
+interface ErrorBoundaryState { error: Error | null }
+class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryState> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 24, color: '#333' }}>
+          <h2>Что-то пошло не так</h2>
+          <pre style={{ fontSize: 12, whiteSpace: 'pre-wrap', color: '#c00' }}>
+            {this.state.error.message}
+            {'\n'}
+            {this.state.error.stack}
+          </pre>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
-function AppInner() {
+function AppRoutes() {
   const { onboardingCompleted } = useAuthStore();
+  const navigate = useNavigate();
+  const location = useLocation();
 
   useEffect(() => {
     // Initialize Telegram WebApp if available
@@ -64,27 +64,14 @@ function AppInner() {
 
       // After WebApp.ready(), CloudStorage is guaranteed available.
       // Rehydrate: read cloud → merge with local → update store.
-      // Do NOT forceSyncToCloud here — that would overwrite cloud with stale
-      // local data before the cloud read completes on other devices.
-      //
-      // Use 1500ms delay on first attempt — Telegram Desktop WebApp bridge
-      // can take longer than mobile to expose CloudStorage after ready().
-      // If CloudStorage is still not available (tgCloud() returns null inside
-      // rehydrateFromCloud), the function returns early and we retry at 3000ms.
       let retryTimer: ReturnType<typeof setTimeout> | null = null;
       const timer = setTimeout(() => {
         rehydrateFromCloud().catch(() => {/* ignore */});
-        // Retry once more at 3s in case CloudStorage wasn't ready at 1.5s
-        // (common on Telegram Desktop first open). rehydrateFromCloud() is
-        // idempotent and guarded by _rehydrating so double-calls are safe.
         retryTimer = setTimeout(() => {
           rehydrateFromCloud().catch(() => {/* ignore */});
         }, 1500);
       }, 1500);
 
-      // Re-sync when Mini App is re-activated (user switches back from another chat).
-      // Using Telegram's native 'activated' event only — NOT visibilitychange,
-      // because visibilitychange fires during page reload and breaks the WebApp bridge.
       const handleActivated = async () => {
         await rehydrateFromCloud().catch(() => {/* ignore */});
       };
@@ -98,19 +85,40 @@ function AppInner() {
       };
     }
 
-    // Redirect to onboarding if not completed
-    if (!onboardingCompleted) {
-      router.navigate('/onboarding');
+    // Redirect to onboarding if not completed (browser-only, not in Telegram)
+    if (!onboardingCompleted && location.pathname !== '/onboarding') {
+      navigate('/onboarding');
     }
-  }, [onboardingCompleted]);
+  }, [onboardingCompleted, navigate, location.pathname]);
 
-  return <RouterProvider router={router} />;
+  return (
+    <Routes>
+      <Route path="/onboarding" element={<OnboardingPage />} />
+      <Route path="/" element={<AppLayout />}>
+        <Route index element={<DashboardPage />} />
+        <Route path="transactions" element={<TransactionsPage />} />
+        <Route path="transactions/add" element={<AddTransactionPage />} />
+        <Route path="analytics" element={<AnalyticsPage />} />
+        <Route path="analytics/category/:categoryId" element={<CategoryDetailPage />} />
+        <Route path="goals" element={<GoalsPage />} />
+        <Route path="goals/:id" element={<GoalDetailPage />} />
+        <Route path="budget" element={<BudgetPage />} />
+        <Route path="recurring" element={<RecurringPage />} />
+        <Route path="ai" element={<AiChatPage />} />
+        <Route path="profile" element={<ProfilePage />} />
+      </Route>
+    </Routes>
+  );
 }
 
 export function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <AppInner />
+      <HashRouter>
+        <ErrorBoundary>
+          <AppRoutes />
+        </ErrorBoundary>
+      </HashRouter>
     </QueryClientProvider>
   );
 }
