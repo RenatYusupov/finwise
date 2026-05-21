@@ -27,29 +27,22 @@ const queryClient = new QueryClient({
 });
 
 /**
- * Synchronous Telegram context detection.
- *
- * window.Telegram?.WebApp is populated by the SDK script which loads
- * asynchronously — it may be undefined on the very first render cycle.
- * We therefore use three additional synchronous signals:
- *   1. window.TelegramWebviewProxy — injected by the native Telegram app
- *      into the WebView before any JS runs.
- *   2. URL hash containing "tgWebApp" — Telegram appends launch params to
- *      the hash fragment synchronously before the page loads.
- *   3. window.Telegram?.WebApp — available once the SDK script has run.
- *
- * This function is safe to call at module level or during render.
+ * Frozen Telegram context flag — set synchronously in main.tsx before React mounts.
+ * Using a module-level constant avoids re-evaluating the check on every render/effect.
+ * Falls back to runtime checks in case this module is loaded before main.tsx sets the flag
+ * (e.g. in tests or SSR).
  */
-function isTelegramContext(): boolean {
+const IS_TELEGRAM: boolean = (() => {
   if (typeof window === 'undefined') return false;
-  // Native Telegram WebView injects this proxy object synchronously
-  if ((window as unknown as { TelegramWebviewProxy?: unknown }).TelegramWebviewProxy) return true;
-  // SDK already loaded
+  // Prefer the flag set by main.tsx before ReactDOM.render
+  const w = window as unknown as Record<string, unknown>;
+  if (typeof w.__isTelegram === 'boolean') return w.__isTelegram as boolean;
+  // Fallback: check synchronous signals directly
+  if (w.TelegramWebviewProxy) return true;
   if (window.Telegram?.WebApp) return true;
-  // Telegram appends launch params to the URL hash before JS runs
   if (window.location.hash.includes('tgWebApp')) return true;
   return false;
-}
+})();
 
 // Global error boundary to catch silent render crashes
 interface ErrorBoundaryState { error: Error | null }
@@ -142,11 +135,10 @@ function AppRoutes() {
   }, []); // intentionally empty — one-time init only
 
   // Onboarding redirect — browser-only.
-  // Uses isTelegramContext() which is synchronous and reliable even before
-  // the Telegram SDK script finishes loading, preventing a race condition
-  // where window.Telegram?.WebApp is undefined on the first render cycle.
+  // IS_TELEGRAM is a module-level constant frozen at page-load time in main.tsx,
+  // so it never changes during the session and cannot cause a race condition.
   useEffect(() => {
-    if (isTelegramContext()) return; // never redirect in Telegram
+    if (IS_TELEGRAM) return; // never redirect in Telegram
     if (!onboardingCompleted && location.pathname !== '/onboarding') {
       navigate('/onboarding');
     }
