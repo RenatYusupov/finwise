@@ -44,6 +44,20 @@ const IS_TELEGRAM: boolean = (() => {
   return false;
 })();
 
+// DEBUG: capture detection signals at module load time for the overlay
+const _DEBUG_SIGNALS = (() => {
+  if (typeof window === 'undefined') return {};
+  const w = window as unknown as Record<string, unknown>;
+  return {
+    __isTelegram: w.__isTelegram,
+    hasTWP: !!w.TelegramWebviewProxy,
+    hasTgWebApp: !!(window as any).Telegram?.WebApp,
+    hashHasTg: window.location.hash.includes('tgWebApp'),
+    hash: window.location.hash.slice(0, 40),
+    href: window.location.href.slice(0, 60),
+  };
+})();
+
 // Global error boundary to catch silent render crashes
 interface ErrorBoundaryState { error: Error | null }
 class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryState> {
@@ -164,9 +178,28 @@ function AppRoutes() {
   );
 }
 
+// DEBUG overlay component — shows IS_TELEGRAM detection signals on screen
+// REMOVE after diagnosis is confirmed
+function DebugOverlay() {
+  const s = _DEBUG_SIGNALS as Record<string, unknown>;
+  return (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 99999,
+      background: IS_TELEGRAM ? 'rgba(0,180,0,0.9)' : 'rgba(200,0,0,0.9)',
+      color: '#fff', fontSize: 10, padding: '4px 8px', fontFamily: 'monospace',
+      lineHeight: 1.4, wordBreak: 'break-all',
+    }}>
+      <b>IS_TG={String(IS_TELEGRAM)} router={IS_TELEGRAM ? 'MEM' : 'BROWSER'}</b>{' '}
+      __iTG={String(s.__isTelegram)} TWP={String(s.hasTWP)} tgWA={String(s.hasTgWebApp)} hashTg={String(s.hashHasTg)}{' '}
+      hash={String(s.hash)} href={String(s.href)}
+    </div>
+  );
+}
+
 export function App() {
   return (
     <QueryClientProvider client={queryClient}>
+      <DebugOverlay />
       {/*
        * Dual-router pattern (TASK-032):
        *
