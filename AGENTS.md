@@ -11,6 +11,7 @@ finwise/
 ├── README.md              ← публичное описание
 ├── PRODUCT_SPEC.md        ← источник правды по продукту и фичам
 ├── ALGORITHM_SPEC.md      ← спецификация алгоритмов (ALG-001–ALG-004)
+├── ARCHITECTURE.md        ← архитектурные инварианты (роутинг, storage, auth, сервисы)
 ├── docs/
 │   ├── analysis/          ← аналитические артефакты, JSON-результаты
 │   └── tasks/             ← задачи: ТЗ от PM, валидация аналитика, отчёт разработчика
@@ -52,7 +53,7 @@ finwise/
 - **Не трогает:** apps/, services/, PRODUCT_SPEC.md
 
 ### 💻 Developer
-- **Читает:** AGENTS.md, PRODUCT_SPEC.md, ALGORITHM_SPEC.md — обязательно перед реализацией
+- **Читает:** AGENTS.md, PRODUCT_SPEC.md, ALGORITHM_SPEC.md, **ARCHITECTURE.md** — обязательно перед реализацией
 - **Читает задачу:** docs/tasks/TASK-NNN-*.md — перед началом работы
 - **Пишет:** apps/, services/, packages/ + заполняет секцию "Отчёт разработчика" в задаче
 - **Не трогает:** PRODUCT_SPEC.md, ALGORITHM_SPEC.md

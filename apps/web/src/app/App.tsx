@@ -26,32 +26,29 @@ const queryClient = new QueryClient({
   },
 });
 
-const router = createBrowserRouter(
-  [
-    {
-      path: '/onboarding',
-      element: <OnboardingPage />,
-    },
-    {
-      path: '/',
-      element: <AppLayout />,
-      children: [
-        { index: true, element: <DashboardPage /> },
-        { path: 'transactions', element: <TransactionsPage /> },
-        { path: 'transactions/add', element: <AddTransactionPage /> },
-        { path: 'analytics', element: <AnalyticsPage /> },
-        { path: 'analytics/category/:categoryId', element: <CategoryDetailPage /> },
-        { path: 'goals', element: <GoalsPage /> },
-        { path: 'goals/:id', element: <GoalDetailPage /> },
-        { path: 'budget', element: <BudgetPage /> },
-        { path: 'recurring', element: <RecurringPage /> },
-        { path: 'ai', element: <AiChatPage /> },
-        { path: 'profile', element: <ProfilePage /> },
-      ],
-    },
-  ],
-  { basename: '/finwise' }
-);
+const router = createBrowserRouter([
+  {
+    path: '/onboarding',
+    element: <OnboardingPage />,
+  },
+  {
+    path: '/',
+    element: <AppLayout />,
+    children: [
+      { index: true, element: <DashboardPage /> },
+      { path: 'transactions', element: <TransactionsPage /> },
+      { path: 'transactions/add', element: <AddTransactionPage /> },
+      { path: 'analytics', element: <AnalyticsPage /> },
+      { path: 'analytics/category/:categoryId', element: <CategoryDetailPage /> },
+      { path: 'goals', element: <GoalsPage /> },
+      { path: 'goals/:id', element: <GoalDetailPage /> },
+      { path: 'budget', element: <BudgetPage /> },
+      { path: 'recurring', element: <RecurringPage /> },
+      { path: 'ai', element: <AiChatPage /> },
+      { path: 'profile', element: <ProfilePage /> },
+    ],
+  },
+]);
 
 function AppInner() {
   const { onboardingCompleted } = useAuthStore();
