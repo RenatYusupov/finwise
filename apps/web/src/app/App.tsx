@@ -178,55 +178,44 @@ function AppRoutes() {
   );
 }
 
-// DEBUG overlay component — shows IS_TELEGRAM detection signals on screen
+// DEBUG overlay component — shows IS_TELEGRAM detection signals + current route
 // REMOVE after diagnosis is confirmed
-function DebugOverlay() {
+function DebugOverlayInner() {
+  const location = useLocation();
   const s = _DEBUG_SIGNALS as Record<string, unknown>;
   return (
     <div style={{
       position: 'fixed', top: 0, left: 0, right: 0, zIndex: 99999,
-      background: IS_TELEGRAM ? 'rgba(0,180,0,0.9)' : 'rgba(200,0,0,0.9)',
+      background: IS_TELEGRAM ? 'rgba(0,150,0,0.92)' : 'rgba(180,0,0,0.92)',
       color: '#fff', fontSize: 10, padding: '4px 8px', fontFamily: 'monospace',
-      lineHeight: 1.4, wordBreak: 'break-all',
+      lineHeight: 1.5, wordBreak: 'break-all',
     }}>
-      <b>IS_TG={String(IS_TELEGRAM)} router={IS_TELEGRAM ? 'MEM' : 'BROWSER'}</b>{' '}
-      __iTG={String(s.__isTelegram)} TWP={String(s.hasTWP)} tgWA={String(s.hasTgWebApp)} hashTg={String(s.hashHasTg)}{' '}
-      hash={String(s.hash)} href={String(s.href)}
+      <b>IS_TG={String(IS_TELEGRAM)} router={IS_TELEGRAM ? 'MEM' : 'BROWSER'} path={location.pathname}</b>{' '}
+      __iTG={String(s.__isTelegram)} TWP={String(s.hasTWP)} tgWA={String(s.hasTgWebApp)}{' '}
+      hash={String(s.hash).slice(0, 30)}
     </div>
   );
+}
+
+// Wrapper that renders outside the router (for IS_TELEGRAM signal display)
+// and inside the router (for location.pathname display)
+function DebugOverlay() {
+  return null; // replaced by DebugOverlayInner inside router
 }
 
 export function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <DebugOverlay />
-      {/*
-       * Dual-router pattern (TASK-032):
-       *
-       * IN TELEGRAM (IS_TELEGRAM === true):
-       *   MemoryRouter — navigation is purely in-memory, no pushState calls.
-       *   Telegram WebView on iOS/Android intercepts pushState and makes a real
-       *   HTTP request to the new URL, which returns 404 on GitHub Pages.
-       *   MemoryRouter avoids this entirely — URL bar never changes.
-       *
-       * IN BROWSER (IS_TELEGRAM === false):
-       *   BrowserRouter with basename="/finwise" — real URL paths, F5 works,
-       *   direct links work (via 404.html SPA trick from TASK-025).
-       *
-       * HashRouter was tried (TASK-026) but Telegram appends launch params to
-       * the URL hash (#tgWebAppData=...) which HashRouter reads as a route path.
-       *
-       * IS_TELEGRAM is a module-level constant frozen in main.tsx before
-       * ReactDOM.render — it never changes during the session.
-       */}
       {IS_TELEGRAM ? (
         <MemoryRouter initialEntries={['/']} initialIndex={0}>
+          <DebugOverlayInner />
           <ErrorBoundary>
             <AppRoutes />
           </ErrorBoundary>
         </MemoryRouter>
       ) : (
         <BrowserRouter basename="/finwise">
+          <DebugOverlayInner />
           <ErrorBoundary>
             <AppRoutes />
           </ErrorBoundary>
