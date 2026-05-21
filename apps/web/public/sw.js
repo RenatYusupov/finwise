@@ -1,7 +1,7 @@
 // FinWise Service Worker — cache-busting for Telegram iOS WebView
 // Strategy: network-first for HTML, cache-first for assets (JS/CSS have content hashes)
 
-const CACHE_NAME = 'finwise-v2';
+const CACHE_NAME = 'finwise-v1';
 
 self.addEventListener('install', (event) => {
   // Activate immediately — don't wait for old SW to die

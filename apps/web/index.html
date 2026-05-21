@@ -9,6 +9,22 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <title>FinWise</title>
+    <!-- GitHub Pages SPA: restore path encoded by 404.html -->
+    <script>
+      (function() {
+        var p = window.location.search.slice(1).split('&').reduce(function(acc, s) {
+          var r = s.split('=');
+          acc[decodeURIComponent(r[0])] = decodeURIComponent(r.slice(1).join('='));
+          return acc;
+        }, {});
+        if (p.p !== undefined) {
+          window.history.replaceState(null, null,
+            window.location.pathname.split('/').slice(0, 2).join('/') +
+            '/' + p.p.replace(/&/, '?').replace(/%23/, '#')
+          );
+        }
+      })();
+    </script>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
   </head>
   <body>
