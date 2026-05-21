@@ -1,5 +1,4 @@
 import { Outlet, useLocation } from 'react-router-dom';
-import { motion, AnimatePresence } from 'framer-motion';
 import { BottomNav } from '@/shared/ui/BottomNav';
 import { AddTransactionFab } from '@/shared/ui/AddTransactionFab';
 import { useUIStore } from '@/features/ui/store';
@@ -17,45 +16,30 @@ export function AppLayout() {
   const modalOpenCount = useUIStore((s) => s.modalOpenCount);
   const isModalOpen = modalOpenCount > 0;
 
-  // When a modal is open: keep overflow-y-auto so the sheet's inner scroll works,
-  // but add touch-action:none + overscroll-behavior:none to prevent Telegram WebView
-  // from scrolling the background. The sheet's inner div has touch-action:pan-y to override.
   const mainClass = isFullHeight
     ? 'flex-1 min-h-0 flex flex-col overflow-hidden'
     : 'flex-1 min-h-0 overflow-y-auto scroll-area';
 
   return (
     <div className="flex flex-col h-full" style={{ background: 'var(--bg-warm)' }}>
-      {/* Main content area */}
+      {/* Main content area — AnimatePresence removed for debug (TASK-033) */}
       <main
         className={mainClass}
         style={{
           background: 'var(--bg-warm)',
-          // Reserve space for BottomNav (≈64px) + iOS safe-area-inset-bottom
           paddingBottom: isFullHeight ? undefined : 'calc(80px + env(safe-area-inset-bottom, 0px))',
-          // When modal is open: block background scroll in Telegram WebView
-          // The sheet's inner div has touch-action:pan-y to override.
           ...(isModalOpen ? { touchAction: 'none' as const, overscrollBehavior: 'none' as const } : {}),
         }}
       >
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={location.pathname}
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            transition={{ duration: 0.2 }}
-            className={isFullHeight ? 'flex flex-col flex-1 min-h-0' : 'min-h-full'}
-          >
-            <Outlet />
-          </motion.div>
-        </AnimatePresence>
+        <div
+          key={location.pathname}
+          className={isFullHeight ? 'flex flex-col flex-1 min-h-0' : 'min-h-full'}
+        >
+          <Outlet />
+        </div>
       </main>
 
-      {/* FAB for adding transaction — hidden on pages with own bottom UI */}
       {!hideNav && <AddTransactionFab />}
-
-      {/* Bottom navigation — hidden on pages with own bottom UI (AI chat, add transaction) */}
       {!hideNav && <BottomNav />}
     </div>
   );
