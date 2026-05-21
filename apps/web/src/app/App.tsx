@@ -26,6 +26,31 @@ const queryClient = new QueryClient({
   },
 });
 
+/**
+ * Synchronous Telegram context detection.
+ *
+ * window.Telegram?.WebApp is populated by the SDK script which loads
+ * asynchronously — it may be undefined on the very first render cycle.
+ * We therefore use three additional synchronous signals:
+ *   1. window.TelegramWebviewProxy — injected by the native Telegram app
+ *      into the WebView before any JS runs.
+ *   2. URL hash containing "tgWebApp" — Telegram appends launch params to
+ *      the hash fragment synchronously before the page loads.
+ *   3. window.Telegram?.WebApp — available once the SDK script has run.
+ *
+ * This function is safe to call at module level or during render.
+ */
+function isTelegramContext(): boolean {
+  if (typeof window === 'undefined') return false;
+  // Native Telegram WebView injects this proxy object synchronously
+  if ((window as unknown as { TelegramWebviewProxy?: unknown }).TelegramWebviewProxy) return true;
+  // SDK already loaded
+  if (window.Telegram?.WebApp) return true;
+  // Telegram appends launch params to the URL hash before JS runs
+  if (window.location.hash.includes('tgWebApp')) return true;
+  return false;
+}
+
 // Global error boundary to catch silent render crashes
 interface ErrorBoundaryState { error: Error | null }
 class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryState> {
@@ -58,19 +83,32 @@ function AppRoutes() {
   const location = useLocation();
   const tgInitDone = useRef(false);
 
-  // One-time Telegram WebApp initialization — runs only once on mount
+  // One-time Telegram WebApp initialization — runs only once on mount.
+  // We wait for the SDK to be available (it loads async) before calling
+  // ready()/expand(). Poll with a short interval rather than a fixed delay.
   useEffect(() => {
     if (tgInitDone.current) return;
-    tgInitDone.current = true;
 
-    if (window.Telegram?.WebApp) {
+    let pollCount = 0;
+    const MAX_POLLS = 20; // 20 × 100ms = 2s max wait
+
+    const tryInit = () => {
+      if (!window.Telegram?.WebApp) {
+        pollCount++;
+        if (pollCount < MAX_POLLS) {
+          pollTimer = setTimeout(tryInit, 100);
+        }
+        return;
+      }
+
+      tgInitDone.current = true;
       window.Telegram.WebApp.ready();
       window.Telegram.WebApp.expand();
 
       // Rehydrate from CloudStorage after WebApp.ready()
       // Use 1500ms delay — Telegram Desktop bridge can take longer to expose CloudStorage
       let retryTimer: ReturnType<typeof setTimeout> | null = null;
-      const timer = setTimeout(() => {
+      const dataTimer = setTimeout(() => {
         rehydrateFromCloud().catch(() => {/* ignore */});
         retryTimer = setTimeout(() => {
           rehydrateFromCloud().catch(() => {/* ignore */});
@@ -83,18 +121,32 @@ function AppRoutes() {
       };
       window.Telegram.WebApp.onEvent('activated', handleActivated);
 
-      return () => {
-        clearTimeout(timer);
-        if (retryTimer) clearTimeout(retryTimer);
-        window.Telegram?.WebApp?.offEvent('activated', handleActivated);
-      };
-    }
+      // Store cleanup refs on the window so the effect cleanup can reach them
+      (window as unknown as Record<string, unknown>).__fwDataTimer = dataTimer;
+      (window as unknown as Record<string, unknown>).__fwRetryTimer = retryTimer;
+      (window as unknown as Record<string, unknown>).__fwHandleActivated = handleActivated;
+    };
+
+    let pollTimer: ReturnType<typeof setTimeout> = setTimeout(tryInit, 0);
+
+    return () => {
+      clearTimeout(pollTimer);
+      const w = window as unknown as Record<string, unknown>;
+      if (w.__fwDataTimer) clearTimeout(w.__fwDataTimer as ReturnType<typeof setTimeout>);
+      if (w.__fwRetryTimer) clearTimeout(w.__fwRetryTimer as ReturnType<typeof setTimeout>);
+      if (w.__fwHandleActivated && window.Telegram?.WebApp) {
+        window.Telegram.WebApp.offEvent('activated', w.__fwHandleActivated as () => void);
+      }
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // intentionally empty — one-time init only
 
-  // Separate effect for onboarding redirect (browser-only, not in Telegram)
+  // Onboarding redirect — browser-only.
+  // Uses isTelegramContext() which is synchronous and reliable even before
+  // the Telegram SDK script finishes loading, preventing a race condition
+  // where window.Telegram?.WebApp is undefined on the first render cycle.
   useEffect(() => {
-    if (window.Telegram?.WebApp) return; // Telegram handles its own flow
+    if (isTelegramContext()) return; // never redirect in Telegram
     if (!onboardingCompleted && location.pathname !== '/onboarding') {
       navigate('/onboarding');
     }
