@@ -58,6 +58,7 @@ finwise/
 - **Пишет:** apps/, services/, packages/ + заполняет секцию "Отчёт разработчика" в задаче
 - **Не трогает:** PRODUCT_SPEC.md, ALGORITHM_SPEC.md
 - **После реализации:** git commit + git push (обязательно, см. Git Workflow)
+- **🚫 НЕ создаёт задачи самостоятельно** — задачи создаёт только Product Manager. Если нужна новая задача, переключиться в режим `product-manager` (switch_mode) и создать задачу там, затем вернуться в `code`.
 
 ---
 
