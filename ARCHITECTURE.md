@@ -6,20 +6,43 @@
 
 ---
 
-## 🌐 SPA Роутинг — HashRouter для GitHub Pages
+## 🌐 SPA Роутинг — двойной роутер (MemoryRouter в Telegram, BrowserRouter в браузере)
 
-Приложение хостится на **GitHub Pages** по адресу `https://<user>.github.io/finwise/`.
-Используется **`HashRouter`** (React Router v6) — единственный надёжный способ SPA-роутинга на GitHub Pages без серверного конфига.
+Приложение хостится на **GitHub Pages** по адресу `https://renatYusupov.github.io/finwise/`.
 
-### Как работает HashRouter
+### Почему двойной роутер
 
-URL выглядит как `https://.../finwise/#/analytics`. Всё после `#` — это hash, который браузер никогда не отправляет на сервер. GitHub Pages всегда отдаёт `index.html`, React Router читает hash и рендерит нужный компонент.
+Ни один из стандартных роутеров не работает одновременно в Telegram WebView и в браузере:
 
-**Преимущества перед BrowserRouter на GitHub Pages:**
-- Не нужен `basename`
-- Не нужен `404.html` redirect trick
-- Не нужен серверный `try_files` fallback
-- Прямые URL и F5 работают без дополнительной конфигурации
+| Роутер | Проблема в Telegram | Проблема в браузере |
+|--------|--------------------|--------------------|
+| `HashRouter` | Telegram добавляет launch params в hash (`#tgWebAppData=...`) → HashRouter читает их как путь маршрута → blank screen при открытии | — |
+| `BrowserRouter` | `pushState('/finwise/analytics')` перехватывается Telegram WebView → реальный HTTP GET → GitHub Pages 404 → blank screen при навигации | Работает корректно |
+| `MemoryRouter` | Работает корректно — нет вызовов `pushState`, нет изменений URL | F5 всегда возвращает на `/` — нет прямых ссылок |
+
+**Решение (TASK-032):** использовать `IS_TELEGRAM` (модульная константа, замороженная в `main.tsx` до монтирования React) для выбора роутера:
+- `IS_TELEGRAM === true` → `MemoryRouter` — навигация in-memory, URL не меняется
+- `IS_TELEGRAM === false` → `BrowserRouter` с `basename="/finwise"` — реальные URL, работает F5
+
+### Текущий конфиг роутера ([`apps/web/src/app/App.tsx`](apps/web/src/app/App.tsx))
+
+```tsx
+export function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      {IS_TELEGRAM ? (
+        <MemoryRouter initialEntries={['/']} initialIndex={0}>
+          <ErrorBoundary><AppRoutes /></ErrorBoundary>
+        </MemoryRouter>
+      ) : (
+        <BrowserRouter basename="/finwise">
+          <ErrorBoundary><AppRoutes /></ErrorBoundary>
+        </BrowserRouter>
+      )}
+    </QueryClientProvider>
+  );
+}
+```
 
 ### Текущий конфиг (3 файла в синхроне)
 
@@ -33,24 +56,31 @@ URL выглядит как `https://.../finwise/#/analytics`. Всё после
 
 | Симптом | Причина |
 |---------|---------|
-| Приложение не открывается (blank screen) | `vite base` не совпадает с путём на хостинге — все assets 404 |
+| Blank screen при открытии в Telegram | `IS_TELEGRAM` не определён или `HashRouter` используется вместо `MemoryRouter` |
+| Blank screen при навигации по вкладкам в Telegram | `BrowserRouter` используется в Telegram — `pushState` перехватывается WebView |
+| Blank screen при открытии в браузере | `vite base` не совпадает с путём на хостинге — все assets 404 |
 | SW не регистрируется | Путь SW не совпадает с `base` |
 | Старые assets после деплоя | `CACHE_NAME` не инкрементирован |
 
 ### Чеклист при любом изменении роутинга
 
+- [ ] `App.tsx` → `IS_TELEGRAM` используется для выбора роутера?
+- [ ] `main.tsx` → `window.__isTelegram` устанавливается синхронно до `ReactDOM.render`?
 - [ ] `vite.config.ts` → `base` обновлён?
 - [ ] `main.tsx` → SW path и scope совпадают с `base`?
 - [ ] `sw.js` → `CACHE_NAME` инкрементирован?
-- [ ] Все вкладки BottomNav работают после деплоя?
-- [ ] F5 на любой вкладке не даёт blank?
+- [ ] Все вкладки BottomNav работают в Telegram после деплоя?
+- [ ] Все вкладки BottomNav работают в браузере после деплоя?
+- [ ] F5 на любой вкладке в браузере не даёт blank?
 
 ### Дополнительные правила
 
-- `navigate('/analytics')` — путь без `#`, React Router добавляет hash автоматически.
-- `location.pathname` внутри router — путь после `#` (например `/analytics`), использовать напрямую для `isActive`-проверок.
+- `navigate('/analytics')` — путь без `#`, работает одинаково с `MemoryRouter` и `BrowserRouter`.
+- `location.pathname` внутри router — путь (например `/analytics`), использовать напрямую для `isActive`-проверок.
 - Deploy workflow (`.github/workflows/deploy.yml`) заменяет `finwise-v1` в `sw.js` на timestamp через `sed`. Не менять `CACHE_NAME` вручную на что-то кроме `finwise-v1`.
-- **Никогда не переключаться обратно на `createBrowserRouter`** без настройки серверного SPA fallback.
+- **Никогда не использовать `HashRouter`** — конфликтует с Telegram launch params в URL hash.
+- **Никогда не использовать только `BrowserRouter` без условия `IS_TELEGRAM`** — `pushState` перехватывается Telegram WebView.
+- **`IS_TELEGRAM` определяется в `main.tsx`** через `TelegramWebviewProxy` (синхронный сигнал от нативного WebView) и `window.location.hash.includes('tgWebApp')`. Не переопределять в других местах.
 
 ---
 

@@ -1,5 +1,5 @@
 import { useEffect, useRef, Component, type ReactNode } from 'react';
-import { BrowserRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom';
+import { BrowserRouter, MemoryRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AppLayout } from './AppLayout';
 import { OnboardingPage } from '@/pages/onboarding/OnboardingPage';
@@ -167,15 +167,38 @@ function AppRoutes() {
 export function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      {/* BrowserRouter with basename="/finwise" for GitHub Pages project repo.
-          HashRouter was tried (TASK-026) but Telegram appends launch params to
-          the URL hash (e.g. #tgWebAppData=...) which HashRouter interprets as a
-          route path, causing a blank screen. BrowserRouter avoids this entirely. */}
-      <BrowserRouter basename="/finwise">
-        <ErrorBoundary>
-          <AppRoutes />
-        </ErrorBoundary>
-      </BrowserRouter>
+      {/*
+       * Dual-router pattern (TASK-032):
+       *
+       * IN TELEGRAM (IS_TELEGRAM === true):
+       *   MemoryRouter — navigation is purely in-memory, no pushState calls.
+       *   Telegram WebView on iOS/Android intercepts pushState and makes a real
+       *   HTTP request to the new URL, which returns 404 on GitHub Pages.
+       *   MemoryRouter avoids this entirely — URL bar never changes.
+       *
+       * IN BROWSER (IS_TELEGRAM === false):
+       *   BrowserRouter with basename="/finwise" — real URL paths, F5 works,
+       *   direct links work (via 404.html SPA trick from TASK-025).
+       *
+       * HashRouter was tried (TASK-026) but Telegram appends launch params to
+       * the URL hash (#tgWebAppData=...) which HashRouter reads as a route path.
+       *
+       * IS_TELEGRAM is a module-level constant frozen in main.tsx before
+       * ReactDOM.render — it never changes during the session.
+       */}
+      {IS_TELEGRAM ? (
+        <MemoryRouter initialEntries={['/']} initialIndex={0}>
+          <ErrorBoundary>
+            <AppRoutes />
+          </ErrorBoundary>
+        </MemoryRouter>
+      ) : (
+        <BrowserRouter basename="/finwise">
+          <ErrorBoundary>
+            <AppRoutes />
+          </ErrorBoundary>
+        </BrowserRouter>
+      )}
     </QueryClientProvider>
   );
 }
