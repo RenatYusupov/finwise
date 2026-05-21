@@ -9,7 +9,7 @@ import './app/styles/globals.css';
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker
-      .register('/finwise/sw.js', { scope: '/finwise/' })
+      .register('/sw.js', { scope: '/' })
       .catch(() => {/* SW registration failure is non-fatal */});
   });
 }
