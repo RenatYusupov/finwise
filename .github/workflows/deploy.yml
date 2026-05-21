@@ -49,7 +49,7 @@ jobs:
       - name: Inject build timestamp into service worker
         run: |
           BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          sed -i "s/finwise-v1/finwise-${BUILD_TIME}/" apps/web/public/sw.js
+          sed -i "s/finwise-v3/finwise-${BUILD_TIME}/" apps/web/public/sw.js
 
       - name: Build web app
         run: pnpm --filter @finwise/web build
