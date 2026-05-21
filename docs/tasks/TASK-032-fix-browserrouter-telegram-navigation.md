@@ -1,6 +1,6 @@
 # TASK-032: Fix blank screen on tab navigation in Telegram WebView
 
-**Статус:** 📝 Draft  
+**Статус:** ✅ Done
 **Приоритет:** P0  
 **Sprint:** hotfix  
 **Создана:** 2026-05-21  
@@ -162,21 +162,27 @@ export function App() {
 
 ## 💻 Отчёт разработчика (заполняет Developer)
 
-**Статус реализации:** —  
-**Дата завершения:** —  
-**Коммит:** —
+**Статус реализации:** ✅ Done
+**Дата завершения:** 2026-05-21
+**Коммит:** `404d6b3f`
 
 ### Что сделано
 
-> —
+- [`apps/web/src/app/App.tsx:2`](apps/web/src/app/App.tsx) — добавлен `MemoryRouter` в импорт из `react-router-dom`
+- [`apps/web/src/app/App.tsx:167-205`](apps/web/src/app/App.tsx) — функция `App()` заменена: вместо безусловного `BrowserRouter` используется условный рендер: `IS_TELEGRAM ? <MemoryRouter initialEntries={['/']}> : <BrowserRouter basename="/finwise">`. Добавлен подробный комментарий с объяснением причины и историей предыдущих попыток (HashRouter, BrowserRouter).
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — раздел «SPA Роутинг» полностью переписан: задокументирован dual-router паттерн, таблица сравнения роутеров, обновлён чеклист и правила.
+- [`docs/tasks/TASK-032-fix-browserrouter-telegram-navigation.md`](docs/tasks/TASK-032-fix-browserrouter-telegram-navigation.md) — создана задача PM, заполнен отчёт разработчика.
 
 ### Что НЕ сделано (если есть)
 
-> —
+- `AppRoutes`, маршруты, пути навигации — не изменялись (не требовалось)
+- `vite.config.ts`, `sw.js`, `404.html`, `main.tsx` — не изменялись (не требовалось)
 
 ### Риски и известные ограничения
 
-> —
+- **Deep links в Telegram**: при `MemoryRouter` URL не меняется, поэтому открыть конкретную вкладку по внешней ссылке невозможно. Это приемлемо — Telegram Mini Apps не поддерживают deep links через URL path в WebView.
+- **`IS_TELEGRAM` ложно-отрицательный**: если Telegram WebView не инжектирует `TelegramWebviewProxy` и не добавляет `tgWebApp` в hash (крайне редкий случай), будет использован `BrowserRouter` → возможен blank screen при навигации. Не блокирует.
+- **Back button в Telegram**: `MemoryRouter` поддерживает `history.back()` через React Router — работает корректно.
 
 ### Тестирование
 
