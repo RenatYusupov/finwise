@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useFinanceStore } from '@/features/finance/store';
 import { useUIStore } from '@/features/ui/store';
@@ -330,6 +331,7 @@ function AddToGoalModal({ goalId, goalName, goalColor, onClose }: {
 
 export function GoalsPage() {
   const { goals, deleteGoal } = useFinanceStore();
+  const navigate = useNavigate();
   const [showAdd, setShowAdd] = useState(false);
   const [addToGoalId, setAddToGoalId] = useState<string | null>(null);
 
@@ -406,7 +408,8 @@ export function GoalsPage() {
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: i * 0.07 }}
-                className="bg-white rounded-2xl overflow-hidden"
+                onClick={() => navigate(`/goals/${goal.id}`)}
+                className="bg-white rounded-2xl overflow-hidden cursor-pointer haptic"
                 style={{ boxShadow: 'var(--shadow-card)' }}
               >
                 {/* Color accent top bar */}
@@ -457,7 +460,7 @@ export function GoalsPage() {
                     {!isCompleted && (
                       <motion.button
                         whileTap={{ scale: 0.97 }}
-                        onClick={() => setAddToGoalId(goal.id)}
+                        onClick={(e) => { e.stopPropagation(); setAddToGoalId(goal.id); }}
                         className="flex-1 py-2.5 text-white text-sm font-bold rounded-xl haptic"
                         style={{ background: `linear-gradient(135deg, ${goal.color}, ${goal.color}CC)` }}
                       >
@@ -466,7 +469,7 @@ export function GoalsPage() {
                     )}
                     <motion.button
                       whileTap={{ scale: 0.97 }}
-                      onClick={() => deleteGoal(goal.id)}
+                      onClick={(e) => { e.stopPropagation(); deleteGoal(goal.id); }}
                       className="w-10 h-10 rounded-xl flex items-center justify-center haptic text-sm"
                       style={{ background: '#FFF0EB', color: '#FF4757' }}
                     >

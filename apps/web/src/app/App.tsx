@@ -9,6 +9,7 @@ import { AddTransactionPage } from '@/pages/transactions/AddTransactionPage';
 import { AnalyticsPage } from '@/pages/analytics/AnalyticsPage';
 import { CategoryDetailPage } from '@/pages/analytics/CategoryDetailPage';
 import { GoalsPage } from '@/pages/goals/GoalsPage';
+import { GoalDetailPage } from '@/pages/goals/GoalDetailPage';
 import { BudgetPage } from '@/pages/budget/BudgetPage';
 import { AiChatPage } from '@/pages/ai-chat/AiChatPage';
 import { ProfilePage } from '@/pages/profile/ProfilePage';
@@ -41,6 +42,7 @@ const router = createBrowserRouter(
         { path: 'analytics', element: <AnalyticsPage /> },
         { path: 'analytics/category/:categoryId', element: <CategoryDetailPage /> },
         { path: 'goals', element: <GoalsPage /> },
+        { path: 'goals/:id', element: <GoalDetailPage /> },
         { path: 'budget', element: <BudgetPage /> },
         { path: 'recurring', element: <RecurringPage /> },
         { path: 'ai', element: <AiChatPage /> },
