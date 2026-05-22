@@ -461,12 +461,16 @@ function AiInsightBanner({ expenses, income, navigate }: { expenses: number; inc
 }
 
 function UpcomingPaymentsWidget({ navigate }: { navigate: (p: string) => void }) {
-  const upcoming = useFinanceStore((s) => s.getUpcomingPayments(7));
-  if (upcoming.length === 0) return null;
+  // Only show payments that the user has explicitly confirmed (not auto-detected noise)
+  // and only within the next 3 days (urgent window)
+  const upcoming = useFinanceStore((s) => s.getUpcomingPayments(3));
+  const confirmed = upcoming.filter((p) => p.confirmedByUser);
 
-  const total = upcoming.reduce((sum, p) => sum + p.amountMedian, 0);
-  const visible = upcoming.slice(0, 3);
-  const extra = upcoming.length - visible.length;
+  if (confirmed.length === 0) return null;
+
+  const total = confirmed.reduce((sum, p) => sum + p.amountMedian, 0);
+  const visible = confirmed.slice(0, 3);
+  const extra = confirmed.length - visible.length;
   const labelFor = (days: number) => days === 0 ? 'Сегодня' : days === 1 ? 'Завтра' : `через ${days} дн.`;
 
   return (
@@ -494,7 +498,7 @@ function UpcomingPaymentsWidget({ navigate }: { navigate: (p: string) => void })
         {extra > 0 && <div className="text-xs text-gray-400">+{extra} ещё</div>}
       </div>
       <div className="mt-3 pt-3 border-t border-gray-100 flex justify-between text-sm">
-        <span className="text-gray-500">Итого в ближайшие 7 дней</span>
+        <span className="text-gray-500">Итого в ближайшие 3 дня</span>
         <span className="font-bold text-gray-900">{formatCurrency(total)}</span>
       </div>
     </motion.button>

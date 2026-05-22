@@ -429,24 +429,35 @@ export function detectRecurringPayments(
   transactions: Transaction[],
   existing: RecurringPayment[],
 ): RecurringPayment[] {
-  // FIX-2: Two-level threshold — subscriptions (Netflix 799₽) vs payments (rent 30,000₽)
-  const MIN_AMOUNT_SUBSCRIPTIONS = 100;   // catches Netflix 799₽, Yandex Plus 299₽
-  const MIN_AMOUNT_PAYMENTS = 1_000;      // general recurring payments
-  const MIN_AMOUNT = MIN_AMOUNT_SUBSCRIPTIONS; // effective lower bound
-  const MIN_MONTHS = 2;
+  // Thresholds — raised to reduce false positives
+  const MIN_AMOUNT = 500;        // raised from 100 to 500 ₽ (subscriptions handled via whitelist)
+  const MIN_MONTHS = 3;          // raised from 2 to 3 months
+  const MIN_CLUSTER_SIZE = 3;    // minimum transactions in cluster
   const AMOUNT_TOLERANCE = 0.15; // ±15%
   const DAY_TOLERANCE = 7;       // ±7 days
+
+  // Categories that are inherently non-recurring (variable spend)
+  const EXCLUDE_CATEGORIES = new Set([
+    'cafe', 'food', 'shopping', 'entertainment',
+  ]);
+
+  // Subscription keyword whitelist — allow amounts 100–499 ₽ if description matches
+  const SUBSCRIPTION_KEYWORDS =
+    /яндекс.?плюс|яндекс.?музык|netflix|spotify|apple|google.?play|vk.?музык|okko|кинопоиск|ivi|more\.tv|premier|lit\.res|liters|wink|megafon\.tv|beeline\.tv|mts\.tv/i;
 
   const now = new Date();
   const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 6, 1).toISOString();
 
-  // Only expenses and transfers (not income, not salary)
+  // Only expenses and transfers (not income, not salary, not variable-spend categories)
   const candidates = transactions.filter(
     (t) =>
       (t.type === 'expense' || t.type === 'transfer') &&
       t.categoryId !== 'salary' &&
+      !EXCLUDE_CATEGORIES.has(t.categoryId) &&
       t.date >= sixMonthsAgo &&
-      t.amount >= MIN_AMOUNT,
+      (t.amount >= MIN_AMOUNT ||
+        // Allow small subscription amounts if description matches known services
+        (t.amount >= 100 && SUBSCRIPTION_KEYWORDS.test(t.description || ''))),
   );
 
   if (candidates.length === 0) return [];
@@ -497,7 +508,9 @@ export function detectRecurringPayments(
   }
 
   // Filter clusters that qualify as recurring
-  const qualifying = clusters.filter((c) => c.months.size >= MIN_MONTHS);
+  const qualifying = clusters.filter(
+    (c) => c.months.size >= MIN_MONTHS && c.txs.length >= MIN_CLUSTER_SIZE,
+  );
 
   // Build label from most common description words
   function buildLabel(txs: Transaction[]): string {
@@ -554,7 +567,13 @@ export function detectRecurringPayments(
     results.push(entry);
   }
 
-  return results;
+  // Sort by confidence desc, cap at 20 to avoid overwhelming the user
+  const confidenceOrder: Record<RecurringPayment['confidence'], number> = {
+    high: 0, medium: 1, low: 2,
+  };
+  return results
+    .sort((a, b) => confidenceOrder[a.confidence] - confidenceOrder[b.confidence])
+    .slice(0, 20);
 }
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -654,7 +673,7 @@ export const useFinanceStore = create<FinanceState>()(
       addTransactionsBatch: (txs) => {
         // Build dedup key: date(10 chars)|amount|description(50 chars)
         const dedupKey = (tx: Omit<Transaction, 'id' | 'category'>) =>
-          `${tx.date.slice(0, 10)}|${tx.amount}|${tx.description.slice(0, 50)}`;
+          `${tx.date.slice(0, 10)}|${tx.amount}|${(tx.description || '').slice(0, 50)}`;
 
         const existing = get().transactions;
         const existingKeys = new Set(existing.map(dedupKey));
@@ -679,6 +698,7 @@ export const useFinanceStore = create<FinanceState>()(
           };
           newTxs.push({
             ...tx,
+            description: tx.description || 'Операция',
             id: `tx_${Date.now()}_${Math.random().toString(36).slice(2)}_${imported}`,
             category,
           });

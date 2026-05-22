@@ -39,7 +39,7 @@ async function recategorizeWithGroq(transactions: ParsedBankTx[]): Promise<Parse
     // Send all uncategorized transactions to backend in one request (backend handles batching)
     const payload = needsGroq.map((item, batchIdx) => ({
       idx: batchIdx,
-      description: item.tx.description,
+      description: item.tx.description || '',
       bankCategory: item.tx.bankCategory,
       type: item.tx.type,
       amount: item.tx.amount,
