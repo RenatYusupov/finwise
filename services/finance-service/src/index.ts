@@ -50,6 +50,10 @@ async function getTelegramId(req: any, reply: any): Promise<bigint | null> {
 
 async function maybeSendBudgetAlert(telegramId: bigint, category: string): Promise<void> {
   try {
+    // Check user notification preferences before sending (TASK-020)
+    const settings = await prisma.finUserSettings.findUnique({ where: { telegramId } });
+    if (settings && !settings.budgetAlerts) return;
+
     const budgets = await prisma.finBudget.findMany({ where: { telegramId, category } });
     if (budgets.length === 0) return;
 
@@ -470,6 +474,61 @@ app.delete('/recurring-payments/:id', async (req: any, reply: any) => {
 
   await prisma.finRecurringPayment.delete({ where: { id: existing.id } });
   return reply.send({ data: { success: true } });
+});
+
+// ── Notification Settings (TASK-020) ─────────────────────────────────────────
+
+/** Default settings returned when a user has no row in fin_user_settings */
+const DEFAULT_NOTIF_SETTINGS = {
+  budgetAlerts: true,
+  recurringReminders: true,
+  weeklyReport: true,
+  aiInsights: true,
+};
+
+app.get('/settings/notifications', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
+
+  const row = await prisma.finUserSettings.findUnique({ where: { telegramId } });
+  return reply.send({ data: row ?? { telegramId: telegramId.toString(), ...DEFAULT_NOTIF_SETTINGS } });
+});
+
+app.put('/settings/notifications', async (req: any, reply: any) => {
+  const telegramId = await getTelegramId(req, reply);
+  if (!telegramId) return;
+
+  const { budgetAlerts, recurringReminders, weeklyReport, aiInsights } = req.body ?? {};
+
+  const data: Record<string, boolean> = {};
+  if (typeof budgetAlerts === 'boolean') data.budgetAlerts = budgetAlerts;
+  if (typeof recurringReminders === 'boolean') data.recurringReminders = recurringReminders;
+  if (typeof weeklyReport === 'boolean') data.weeklyReport = weeklyReport;
+  if (typeof aiInsights === 'boolean') data.aiInsights = aiInsights;
+
+  if (Object.keys(data).length === 0) {
+    return reply.status(400).send({ error: 'No valid fields provided' });
+  }
+
+  const row = await prisma.finUserSettings.upsert({
+    where: { telegramId },
+    create: { telegramId, ...DEFAULT_NOTIF_SETTINGS, ...data },
+    update: data,
+  });
+
+  return reply.send({ data: row });
+});
+
+// Internal endpoint — used by notification-service to check user preferences before sending
+app.get('/internal/notification-settings/:telegramId', async (req: any, reply: any) => {
+  const secret = req.headers['x-internal-secret'];
+  if (!secret || secret !== (process.env.INTERNAL_SECRET ?? 'finwise-internal')) {
+    return reply.status(403).send({ error: 'Forbidden' });
+  }
+
+  const telegramId = BigInt(req.params.telegramId);
+  const row = await prisma.finUserSettings.findUnique({ where: { telegramId } });
+  return reply.send({ data: row ?? { telegramId: telegramId.toString(), ...DEFAULT_NOTIF_SETTINGS } });
 });
 
 // ── Sync ──────────────────────────────────────────────────────────────────────

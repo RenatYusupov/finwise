@@ -1,6 +1,7 @@
 import { useEffect, useRef, Component, type ReactNode } from 'react';
 import { BrowserRouter, MemoryRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { Toaster } from 'react-hot-toast';
 import { AppLayout } from './AppLayout';
 import { OnboardingPage } from '@/pages/onboarding/OnboardingPage';
 import { DashboardPage } from '@/pages/dashboard/DashboardPage';
@@ -167,6 +168,18 @@ function AppRoutes() {
 export function App() {
   return (
     <QueryClientProvider client={queryClient}>
+      <Toaster
+        position="top-center"
+        toastOptions={{
+          duration: 2500,
+          style: {
+            borderRadius: '14px',
+            fontSize: '14px',
+            fontWeight: 600,
+            padding: '10px 16px',
+          },
+        }}
+      />
       {IS_TELEGRAM ? (
         <MemoryRouter initialEntries={['/']} initialIndex={0}>
           <ErrorBoundary>

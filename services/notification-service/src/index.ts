@@ -8,6 +8,7 @@ const app = Fastify({ logger: true });
 const BOT_TOKEN = process.env.BOT_TOKEN ?? process.env.TELEGRAM_BOT_TOKEN ?? '';
 const FINANCE_SERVICE_URL = process.env.FINANCE_SERVICE_URL ?? 'http://localhost:3002';
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL ?? 'http://localhost:3003';
+const INTERNAL_SECRET = process.env.INTERNAL_SECRET ?? 'finwise-internal';
 const PORT = parseInt(process.env.NOTIFICATION_SERVICE_PORT ?? '3004', 10);
 
 if (!BOT_TOKEN) {
@@ -40,6 +41,36 @@ interface WeeklyReportPayload {
 }
 
 type NotificationType = 'budget_alert' | 'recurring_reminder' | 'weekly_report' | 'test';
+
+// ── Notification settings helper (TASK-020) ──────────────────────────────────
+
+interface UserNotifSettings {
+  budgetAlerts: boolean;
+  recurringReminders: boolean;
+  weeklyReport: boolean;
+  aiInsights: boolean;
+}
+
+/** Fetch user notification settings from finance-service.
+ *  Returns all-enabled defaults if the request fails (fail-open). */
+async function getUserNotifSettings(telegramId: string): Promise<UserNotifSettings> {
+  const defaults: UserNotifSettings = {
+    budgetAlerts: true,
+    recurringReminders: true,
+    weeklyReport: true,
+    aiInsights: true,
+  };
+  try {
+    const res = await fetch(`${FINANCE_SERVICE_URL}/internal/notification-settings/${telegramId}`, {
+      headers: { 'x-internal-secret': INTERNAL_SECRET },
+    });
+    if (!res.ok) return defaults;
+    const { data } = await res.json() as { data: UserNotifSettings };
+    return { ...defaults, ...data };
+  } catch {
+    return defaults;
+  }
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -111,7 +142,13 @@ app.post('/notify/budget-alert', async (req: any, reply: any) => {
     return reply.status(400).send({ error: 'telegramId, categoryName and limit are required' });
   }
 
-  // TASK-020 notification settings are not implemented yet; default is enabled.
+  // Check user notification preferences (TASK-020)
+  const settings = await getUserNotifSettings(payload.telegramId);
+  if (!settings.budgetAlerts) {
+    app.log.info({ telegramId: payload.telegramId }, 'Budget alert suppressed by user settings');
+    return reply.send({ data: { queued: false, suppressed: true } });
+  }
+
   const text = buildBudgetAlertMessage(payload);
   await sendTelegramMessage(payload.telegramId, text, 'budget_alert');
   return reply.send({ data: { queued: true } });
@@ -131,11 +168,34 @@ app.post('/notify/test', async (req: any, reply: any) => {
 
 // ── Cron jobs ─────────────────────────────────────────────────────────────────
 
-// Daily at 10:00 UTC — recurring payment reminders.
+// Daily at 10:00 UTC — recurring payment reminders (TASK-020).
+// Finance-service must expose GET /users/active with upcoming recurring payments
+// for this cron to send real reminders. Until then it logs and exits gracefully.
 cron.schedule('0 10 * * *', async () => {
   app.log.info({ FINANCE_SERVICE_URL }, 'Recurring payment reminder cron started');
-  // User notification settings and server-side user listing are implemented in TASK-020.
-  // This job is intentionally safe/no-op until finance-service exposes user notification settings.
+  try {
+    const res = await fetch(`${FINANCE_SERVICE_URL}/users/active`, {
+      headers: { 'x-internal-secret': INTERNAL_SECRET },
+    });
+    if (!res.ok) {
+      app.log.warn('Could not fetch active users for recurring reminders');
+      return;
+    }
+    const { users } = await res.json() as { users: Array<{ telegramId: string; upcomingPayments?: Array<{ label: string; amount: number }> }> };
+    for (const user of users) {
+      const settings = await getUserNotifSettings(user.telegramId);
+      if (!settings.recurringReminders) continue;
+      for (const payment of user.upcomingPayments ?? []) {
+        await sendTelegramMessage(
+          user.telegramId,
+          buildRecurringReminderMessage({ telegramId: user.telegramId, label: payment.label, amount: payment.amount }),
+          'recurring_reminder'
+        );
+      }
+    }
+  } catch (err) {
+    app.log.error({ err }, 'Recurring reminder cron failed');
+  }
 }, { timezone: 'UTC' });
 
 // Weekly report: Sundays at 18:00 UTC (TASK-019).
@@ -157,6 +217,13 @@ cron.schedule('0 18 * * 0', async () => {
 
     for (const user of users) {
       try {
+        // Check user notification preferences before sending (TASK-020)
+        const settings = await getUserNotifSettings(user.telegramId);
+        if (!settings.weeklyReport) {
+          app.log.info({ telegramId: user.telegramId }, 'Weekly report suppressed by user settings');
+          continue;
+        }
+
         // Get AI-generated weekly summary
         const summaryRes = await fetch(`${AI_SERVICE_URL}/ai/weekly-summary`, {
           method: 'POST',

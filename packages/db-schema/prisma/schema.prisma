@@ -348,3 +348,15 @@ model FinRecurringPayment {
   @@index([telegramId])
   @@map("fin_recurring_payments")
 }
+
+// Notification preferences per user (TASK-020)
+model FinUserSettings {
+  telegramId         BigInt  @id
+  budgetAlerts       Boolean @default(true)
+  recurringReminders Boolean @default(true)
+  weeklyReport       Boolean @default(true)
+  aiInsights         Boolean @default(true)
+  updatedAt          DateTime @updatedAt
+
+  @@map("fin_user_settings")
+}

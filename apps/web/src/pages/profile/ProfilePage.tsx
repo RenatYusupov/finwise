@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
+import toast from 'react-hot-toast';
 import { useAuthStore } from '@/features/auth/store';
 import { useFinanceStore, cancelScheduledUpload, forceSyncToCloud } from '@/features/finance/store';
 import { useUIStore } from '@/features/ui/store';
@@ -778,7 +779,7 @@ function NotificationSheet({ onClose }: { onClose: () => void }) {
       key: 'weeklyReport' as const,
       label: 'Еженедельный отчёт',
       icon: '📊',
-      desc: 'Итоги недели каждое воскресенье в 21:00',
+      desc: 'Краткая сводка за неделю каждое воскресенье в 21:00',
     },
     {
       key: 'aiInsights' as const,
@@ -789,6 +790,27 @@ function NotificationSheet({ onClose }: { onClose: () => void }) {
   ];
 
   const allEnabled = settings.every((s) => notificationSettings[s.key]);
+
+  /** Sync a partial patch to finance-service (fire-and-forget, offline-safe) */
+  const syncToBackend = (patch: Partial<typeof notificationSettings>) => {
+    apiClient.put('/settings/notifications', patch).catch(() => {
+      // Silent fail — settings are saved locally in Zustand store regardless
+    });
+  };
+
+  const handleToggle = (key: keyof typeof notificationSettings) => {
+    const newVal = !notificationSettings[key];
+    updateNotificationSettings({ [key]: newVal });
+    syncToBackend({ [key]: newVal });
+    toast.success('Настройки сохранены');
+  };
+
+  const handleDisableAll = () => {
+    const patch = Object.fromEntries(settings.map((s) => [s.key, false])) as Partial<typeof notificationSettings>;
+    updateNotificationSettings(patch);
+    syncToBackend(patch);
+    toast('Все уведомления отключены', { icon: '🔕' });
+  };
 
   return createPortal(
     <motion.div
@@ -848,7 +870,7 @@ function NotificationSheet({ onClose }: { onClose: () => void }) {
                   <div className="text-xs text-gray-400 leading-tight mt-0.5">{s.desc}</div>
                 </div>
                 <button
-                  onClick={() => updateNotificationSettings({ [s.key]: !notificationSettings[s.key] })}
+                  onClick={() => handleToggle(s.key)}
                   className={`relative w-12 h-6 rounded-full transition-colors flex-shrink-0 haptic ${
                     notificationSettings[s.key] ? 'bg-green-500' : 'bg-gray-200'
                   }`}
@@ -869,10 +891,7 @@ function NotificationSheet({ onClose }: { onClose: () => void }) {
         <div className="px-4 pt-2 pb-4">
           <motion.button
             whileTap={{ scale: 0.97 }}
-            onClick={() => {
-              const patch = Object.fromEntries(settings.map((s) => [s.key, false])) as Record<string, boolean>;
-              updateNotificationSettings(patch as any);
-            }}
+            onClick={handleDisableAll}
             disabled={!allEnabled}
             className="w-full py-3 rounded-2xl font-semibold text-sm haptic disabled:opacity-40"
             style={{ background: '#FFF5F5', color: '#FF4757' }}
