@@ -52,10 +52,10 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
     this.state = { error: null };
   }
   static getDerivedStateFromError(error: Error) { return { error }; }
-  componentDidCatch(error: Error) {
+  override componentDidCatch(error: Error) {
     console.error('[FinWise ErrorBoundary]', error);
   }
-  render() {
+  override render() {
     if (this.state.error) {
       return (
         <div style={{ padding: 24, color: '#333', fontFamily: 'sans-serif' }}>

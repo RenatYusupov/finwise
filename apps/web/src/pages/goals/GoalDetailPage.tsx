@@ -222,7 +222,7 @@ function LinkedCategorySection({ goal }: { goal: Goal }) {
       linkedCategoryId: undefined,
       linkedCategoryMode: undefined,
       linkedSince: undefined,
-    });
+    } as unknown as Partial<typeof goal>);
   };
 
   return (

@@ -77,7 +77,7 @@ export function EditTransactionSheet({
 }) {
   const { updateTransaction } = useFinanceStore();
 
-  const [type, setType] = useState<'expense' | 'income'>(tx.type);
+  const [type, setType] = useState<'expense' | 'income'>(tx.type === 'transfer' ? 'expense' : tx.type);
   const [amount, setAmount] = useState(String(tx.amount));
   const [description, setDescription] = useState(tx.description || '');
   const [categoryId, setCategoryId] = useState(tx.categoryId || '');

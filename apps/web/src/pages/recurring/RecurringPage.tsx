@@ -49,7 +49,7 @@ function PaymentForm({
     amount: String(initial?.amountMedian ?? ''),
     dayOfMonth: String(initial?.dayOfMonth ?? 1),
     categoryId: 'home',
-    editId: initial?.id,
+    ...(initial?.id ? { editId: initial.id } : {}),
   });
 
   const day = Number(form.dayOfMonth);

@@ -353,7 +353,8 @@ export function BudgetPage() {
       for (const rec of recs) {
         const existing = newBudgets.findIndex((b) => b.categoryId === rec.categoryId);
         if (existing >= 0) {
-          newBudgets[existing] = { ...newBudgets[existing], limit: rec.recommendedLimit };
+          const cur = newBudgets[existing]!;
+          newBudgets[existing] = { ...cur, limit: rec.recommendedLimit };
         } else {
           const spent = categorySpending.find((c) => c.category.id === rec.categoryId)?.amount ?? 0;
           newBudgets.push({

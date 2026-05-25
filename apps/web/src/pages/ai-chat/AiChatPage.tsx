@@ -380,9 +380,9 @@ export function AiChatPage() {
       const assistantIdx = aiMessages.slice(0, idx + 1).filter((m) => m.role === 'assistant').length - 1;
       const actionKeys = Object.keys(localActions);
       const matchedKey = actionKeys[assistantIdx];
-      return { ...msg, actions: matchedKey ? localActions[matchedKey] : undefined };
+      return { id: msg.id, role: msg.role, content: msg.content, ...(matchedKey ? { actions: localActions[matchedKey] } : {}) };
     }
-    return msg;
+    return { id: msg.id, role: msg.role, content: msg.content };
   });
 
   return (

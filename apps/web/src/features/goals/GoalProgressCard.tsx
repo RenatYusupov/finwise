@@ -20,7 +20,7 @@ export function GoalProgressCard({ goal, compact = false }: Props) {
           {goal.icon ?? '🎯'}
         </div>
         <div className="flex-1 min-w-0">
-          <div className="font-semibold text-gray-900 text-sm truncate">{goal.name}</div>
+          <div className="font-semibold text-gray-900 text-sm truncate">{goal.title}</div>
           {!compact && (
             <div className="text-xs text-gray-400">
               {formatCurrency(goal.currentAmount)} из {formatCurrency(goal.targetAmount)}

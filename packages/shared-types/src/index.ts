@@ -8,6 +8,8 @@ export interface User {
   telegramId: number;
   username?: string;
   firstName: string;
+  lastName?: string;
+  photoUrl?: string;
   currency: Currency;
   timezone: string;
   onboardingCompleted: boolean;
