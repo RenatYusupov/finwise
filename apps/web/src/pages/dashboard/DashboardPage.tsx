@@ -1,10 +1,11 @@
-import { useMemo } from 'react';
-import { motion } from 'framer-motion';
+import { useMemo, useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { Link, useNavigate } from 'react-router-dom';
 import { useFinanceStore, type Transaction, type RecurringPayment } from '@/features/finance/store';
 import { useAuthStore } from '@/features/auth/store';
 import { formatCurrency } from '@/shared/utils/format';
 import { ProactiveAiInsightCard } from '@/features/analytics/AiInsightCard';
+import { EditTransactionSheet } from '@/pages/transactions/TransactionsPage';
 
 // ─── Spending Profile ─────────────────────────────────────────────────────────
 //
@@ -307,15 +308,54 @@ function SafeToSpendCard({
   transactions,
   recurringPayments,
   income,
+  onTap,
 }: {
   transactions: Transaction[];
   recurringPayments: RecurringPayment[];
   income: number;
+  onTap?: () => void;
 }) {
   const profile = useMemo(
     () => computeSpendingProfile(transactions, recurringPayments),
     [transactions, recurringPayments],
   );
+
+  // No data at all — onboarding nudge instead of blank space
+  if (!profile.hasEnoughHistory && income === 0) {
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.1 }}
+        className="rounded-2xl overflow-hidden"
+        style={{ background: 'linear-gradient(135deg, #6C63FF 0%, #9B59B6 100%)' }}
+      >
+        <div className="p-4">
+          <div className="text-purple-200 text-xs font-medium mb-1">💡 Дневной лимит расходов</div>
+          <div className="text-white text-2xl font-bold mb-1">Рассчитаем для тебя</div>
+          <div className="text-purple-200 text-xs mb-4 leading-relaxed">
+            Импортируй выписку или добавь первый доход — FinWise покажет сколько можно тратить каждый день
+          </div>
+          <div className="flex gap-2">
+            <Link
+              to="/profile"
+              className="flex-1 text-center py-2.5 rounded-xl text-xs font-bold haptic"
+              style={{ background: 'rgba(255,255,255,0.95)', color: '#6C63FF' }}
+            >
+              📁 Импортировать выписку
+            </Link>
+            <Link
+              to="/transactions/add?type=income"
+              className="flex-1 text-center py-2.5 rounded-xl text-xs font-bold haptic"
+              style={{ background: 'rgba(255,255,255,0.15)', color: 'white' }}
+            >
+              ↑ Добавить доход
+            </Link>
+          </div>
+        </div>
+      </motion.div>
+    );
+  }
 
   // Fallback to simple formula if not enough history
   if (!profile.hasEnoughHistory) {
@@ -372,7 +412,8 @@ function SafeToSpendCard({
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: 0.1 }}
       className="rounded-2xl overflow-hidden insight-pulse"
-      style={{ background: cardBg }}
+      style={{ background: cardBg, cursor: onTap ? 'pointer' : 'default' }}
+      onClick={onTap}
     >
       {/* Main row */}
       <div className="flex items-start justify-between p-4 pb-3">
@@ -425,7 +466,7 @@ function SafeToSpendCard({
 function UpcomingPaymentsWidget({ navigate }: { navigate: (p: string) => void }) {
   // Only show payments that the user has explicitly confirmed (not auto-detected noise)
   // and only within the next 3 days (urgent window)
-  const upcoming = useFinanceStore((s) => s.getUpcomingPayments(3));
+  const upcoming = useFinanceStore((s) => s.getUpcomingPayments(7));
   const confirmed = upcoming.filter((p) => p.confirmedByUser);
 
   if (confirmed.length === 0) return null;
@@ -460,7 +501,7 @@ function UpcomingPaymentsWidget({ navigate }: { navigate: (p: string) => void })
         {extra > 0 && <div className="text-xs text-gray-400">+{extra} ещё</div>}
       </div>
       <div className="mt-3 pt-3 border-t border-gray-100 flex justify-between text-sm">
-        <span className="text-gray-500">Итого в ближайшие 3 дня</span>
+        <span className="text-gray-500">Итого в ближайшие 7 дней</span>
         <span className="font-bold text-gray-900">{formatCurrency(total)}</span>
       </div>
     </motion.button>
@@ -476,16 +517,36 @@ export function DashboardPage() {
     streak,
     transactions,
     recurringPayments,
+    deleteTransaction,
   } = useFinanceStore();
   const navigate = useNavigate();
+  const [editingTx, setEditingTx] = useState<Transaction | null>(null);
 
   const summary = getMonthSummary();
   const recentTxs = getRecentTransactions(5);
-  const activeGoals = goals.filter((g) => g.currentAmount < g.targetAmount).slice(0, 2);
+  const isNewUser = transactions.length === 0;
+
+  // Sort active goals by deadline urgency (closest deadline first, then by progress)
+  const activeGoals = useMemo(() => {
+    const now = new Date();
+    return goals
+      .filter((g) => g.currentAmount < g.targetAmount)
+      .sort((a, b) => {
+        const dA = a.deadline ? new Date(a.deadline).getTime() - now.getTime() : Infinity;
+        const dB = b.deadline ? new Date(b.deadline).getTime() - now.getTime() : Infinity;
+        if (dA !== dB) return dA - dB;
+        const pA = a.targetAmount > 0 ? a.currentAmount / a.targetAmount : 0;
+        const pB = b.targetAmount > 0 ? b.currentAmount / b.targetAmount : 0;
+        return pB - pA;
+      })
+      .slice(0, 2);
+  }, [goals]);
 
   const now = new Date();
   const hour = now.getHours();
   const greeting = hour < 12 ? 'Доброе утро' : hour < 18 ? 'Добрый день' : 'Добрый вечер';
+
+  const hasMonthActivity = summary.income > 0 || summary.expenses > 0;
 
   return (
     <div className="px-4 pt-5 pb-4 space-y-3" style={{ background: 'var(--bg-warm)' }}>
@@ -502,7 +563,7 @@ export function DashboardPage() {
           </h1>
         </div>
         <div className="flex items-center gap-2">
-          {streak > 1 && (
+          {streak > 1 ? (
             <motion.div
               animate={{ scale: [1, 1.05, 1] }}
               transition={{ repeat: Infinity, duration: 2 }}
@@ -512,6 +573,17 @@ export function DashboardPage() {
               <span className="streak-fire">🔥</span>
               <span className="text-sm font-bold text-white">{streak}</span>
             </motion.div>
+          ) : (
+            <motion.button
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              onClick={() => navigate('/transactions/add')}
+              className="flex items-center gap-1 px-3 py-1.5 rounded-full haptic"
+              style={{ background: '#FFF0EB' }}
+            >
+              <span>🔥</span>
+              <span className="text-xs font-semibold" style={{ color: '#FF6B35' }}>Начни серию</span>
+            </motion.button>
           )}
           <Link to="/profile">
             <div className="w-9 h-9 rounded-full bg-white shadow-sm flex items-center justify-center text-lg">
@@ -521,49 +593,45 @@ export function DashboardPage() {
         </div>
       </motion.div>
 
-      {/* Balance card */}
-      <motion.div
-        initial={{ opacity: 0, scale: 0.97 }}
-        animate={{ opacity: 1, scale: 1 }}
-        transition={{ delay: 0.05 }}
-        className="rounded-2xl p-5 text-white relative overflow-hidden"
-        style={{ background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%)' }}
-      >
-        {/* Decorative circles */}
-        <div className="absolute -top-8 -right-8 w-32 h-32 rounded-full opacity-10"
-          style={{ background: 'radial-gradient(circle, #6C63FF, transparent)' }} />
-        <div className="absolute -bottom-4 -left-4 w-24 h-24 rounded-full opacity-10"
-          style={{ background: 'radial-gradient(circle, #FF6B35, transparent)' }} />
-
-        <div className="relative">
-          <div className="text-gray-400 text-xs font-medium mb-1 uppercase tracking-wide">Баланс за месяц</div>
-          <div className={`text-4xl font-bold mb-4 ${summary.savings < 0 ? 'text-red-400' : 'text-white'}`}>
-            {summary.savings >= 0 ? '+' : ''}{formatCurrency(summary.savings)}
-          </div>
-          <div className="flex gap-4">
-            <div className="flex-1 bg-white/10 rounded-xl p-2.5">
-              <div className="text-gray-400 text-xs mb-0.5">↑ Доходы</div>
-              <div className="font-bold text-green-400 text-sm">{formatCurrency(summary.income)}</div>
-            </div>
-            <div className="flex-1 bg-white/10 rounded-xl p-2.5">
-              <div className="text-gray-400 text-xs mb-0.5">↓ Расходы</div>
-              <div className="font-bold text-red-400 text-sm">{formatCurrency(summary.expenses)}</div>
-            </div>
-            <div className="flex-1 bg-white/10 rounded-xl p-2.5">
-              <div className="text-gray-400 text-xs mb-0.5">💾 Сбережено</div>
-              <div className={`font-bold text-sm ${summary.savings >= 0 ? 'text-purple-300' : 'text-red-400'}`}>
-                {summary.savings >= 0 ? '+' : ''}{formatCurrency(summary.savings)}
+      {/* Compact month summary — only when there's activity */}
+      {hasMonthActivity && (
+        <motion.div
+          initial={{ opacity: 0, scale: 0.97 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ delay: 0.05 }}
+          className="bg-white rounded-2xl px-4 py-3"
+          style={{ boxShadow: 'var(--shadow-card)' }}
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex gap-4 flex-1">
+              <div>
+                <div className="text-gray-400 text-xs mb-0.5">↑ Доходы</div>
+                <div className="font-bold text-green-500 text-sm">{formatCurrency(summary.income)}</div>
+              </div>
+              <div>
+                <div className="text-gray-400 text-xs mb-0.5">↓ Расходы</div>
+                <div className="font-bold text-red-500 text-sm">{formatCurrency(summary.expenses)}</div>
+              </div>
+              <div>
+                <div className="text-gray-400 text-xs mb-0.5">💾 Остаток</div>
+                <div className={`font-bold text-sm ${summary.savings >= 0 ? 'text-purple-600' : 'text-red-500'}`}>
+                  {summary.savings >= 0 ? '+' : ''}{formatCurrency(summary.savings)}
+                </div>
               </div>
             </div>
+            <Link to="/analytics" className="text-xs font-semibold flex-shrink-0 ml-2" style={{ color: '#6C63FF' }}>
+              Анализ →
+            </Link>
           </div>
-        </div>
-      </motion.div>
+        </motion.div>
+      )}
 
       {/* Smart safe to spend */}
       <SafeToSpendCard
         transactions={transactions}
         recurringPayments={recurringPayments}
         income={summary.income}
+        onTap={() => navigate('/budget')}
       />
 
       {/* Proactive AI insights */}
@@ -573,44 +641,93 @@ export function DashboardPage() {
       <UpcomingPaymentsWidget navigate={navigate} />
 
       {/* Quick actions */}
-      <div className="grid grid-cols-4 gap-2">
-        {[
-          { icon: '↓', label: 'Расход', to: '/transactions/add', bg: '#FFF0EB', color: '#FF6B35' },
-          { icon: '↑', label: 'Доход', to: '/transactions/add?type=income', bg: '#E8FFF5', color: '#00C896' },
-          { icon: '📊', label: 'Анализ', to: '/analytics', bg: '#F0EEFF', color: '#6C63FF' },
-          { icon: '🤖', label: 'AI', to: '/ai', bg: '#F5F0FF', color: '#9B59B6' },
-        ].map((action, i) => (
-          <motion.div
-            key={action.label}
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.1 + i * 0.05 }}
+      <div className="space-y-2">
+        {/* Primary CTA — add expense */}
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.1 }}
+        >
+          <Link
+            to="/transactions/add"
+            className="flex items-center justify-center gap-2 w-full py-3.5 rounded-2xl haptic"
+            style={{ background: 'linear-gradient(135deg, #FF6B35, #FF8C42)' }}
           >
-            <Link
-              to={action.to}
-              className="flex flex-col items-center gap-1.5 py-3 rounded-2xl haptic"
-              style={{ background: action.bg }}
+            <span className="text-xl">↓</span>
+            <span className="text-white font-bold text-sm">Добавить расход</span>
+          </Link>
+        </motion.div>
+        {/* Secondary actions row */}
+        <div className="grid grid-cols-3 gap-2">
+          {[
+            { icon: '↑', label: 'Доход', to: '/transactions/add?type=income', bg: '#E8FFF5', color: '#00C896' },
+            { icon: '📊', label: 'Анализ', to: '/analytics', bg: '#F0EEFF', color: '#6C63FF' },
+            { icon: '🤖', label: 'AI', to: '/ai', bg: '#F5F0FF', color: '#9B59B6' },
+          ].map((action, i) => (
+            <motion.div
+              key={action.label}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.15 + i * 0.05 }}
             >
-              <div className="text-2xl">{action.icon}</div>
-              <div className="text-xs font-semibold" style={{ color: action.color }}>{action.label}</div>
-            </Link>
-          </motion.div>
-        ))}
+              <Link
+                to={action.to}
+                className="flex flex-col items-center gap-1.5 py-3 rounded-2xl haptic"
+                style={{ background: action.bg }}
+              >
+                <div className="text-2xl">{action.icon}</div>
+                <div className="text-xs font-semibold" style={{ color: action.color }}>{action.label}</div>
+              </Link>
+            </motion.div>
+          ))}
+        </div>
       </div>
 
-      {/* Active goals */}
-      {activeGoals.length > 0 && (
-        <div>
-          <div className="flex items-center justify-between mb-2">
-            <h2 className="font-bold text-gray-900 text-sm">🎯 Мои цели</h2>
-            <Link to="/goals" className="text-xs font-medium" style={{ color: '#6C63FF' }}>Все →</Link>
-          </div>
+      {/* Goals — always shown */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="font-bold text-gray-900 text-sm">🎯 Мои цели</h2>
+          <Link to="/goals" className="text-xs font-medium" style={{ color: '#6C63FF' }}>Все →</Link>
+        </div>
+        {activeGoals.length === 0 ? (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 0.3 }}
+          >
+            <Link
+              to="/goals"
+              className="flex items-center gap-3 bg-white rounded-2xl p-4 haptic"
+              style={{ boxShadow: 'var(--shadow-card)' }}
+            >
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl"
+                style={{ background: '#F0EEFF' }}>
+                ✨
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="font-semibold text-gray-900 text-sm">Поставь первую цель</div>
+                <div className="text-xs text-gray-400">Отпуск, машина, подушка безопасности…</div>
+              </div>
+              <div className="text-gray-300 text-lg">›</div>
+            </Link>
+          </motion.div>
+        ) : (
           <div className="space-y-2">
             {activeGoals.map((goal, i) => {
               const progress = goal.targetAmount > 0
                 ? Math.min((goal.currentAmount / goal.targetAmount) * 100, 100)
                 : 0;
               const remaining = goal.targetAmount - goal.currentAmount;
+              const daysLeft = goal.deadline
+                ? Math.ceil((new Date(goal.deadline).getTime() - now.getTime()) / 86_400_000)
+                : null;
+              const urgencyLabel = daysLeft !== null
+                ? daysLeft <= 0
+                  ? '🔴 Срок прошёл'
+                  : daysLeft <= 7
+                    ? `🟡 ${daysLeft} дн. осталось`
+                    : `${daysLeft} дн. осталось`
+                : null;
               return (
                 <motion.div
                   key={goal.id}
@@ -626,7 +743,9 @@ export function DashboardPage() {
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="font-semibold text-gray-900 text-sm truncate">{goal.name}</div>
-                        <div className="text-xs text-gray-400">осталось {formatCurrency(remaining)}</div>
+                        <div className="text-xs text-gray-400">
+                          {urgencyLabel ?? `осталось ${formatCurrency(remaining)}`}
+                        </div>
                       </div>
                       <div className="text-sm font-bold" style={{ color: goal.color }}>{Math.round(progress)}%</div>
                     </div>
@@ -644,8 +763,8 @@ export function DashboardPage() {
               );
             })}
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Recent transactions */}
       <div>
@@ -655,28 +774,40 @@ export function DashboardPage() {
         </div>
         <div className="bg-white rounded-2xl overflow-hidden" style={{ boxShadow: 'var(--shadow-card)' }}>
           {recentTxs.length === 0 ? (
-            <div className="text-center py-8 text-gray-400">
+            <div className="text-center py-8">
               <div className="text-4xl mb-2">💸</div>
-              <div className="text-sm font-medium text-gray-500 mb-1">Нет операций</div>
-              <div className="text-xs text-gray-400 mb-4">Добавь первую трату</div>
-              <Link
-                to="/transactions/add"
-                className="inline-block text-white text-sm font-semibold px-5 py-2.5 rounded-xl haptic"
-                style={{ background: 'linear-gradient(135deg, #FF6B35, #FF8C42)' }}
-              >
-                + Добавить
-              </Link>
+              <div className="text-sm font-medium text-gray-700 mb-1">Нет операций</div>
+              <div className="text-xs text-gray-400 mb-4 px-6 leading-relaxed">
+                Импортируй банковскую выписку — все операции появятся автоматически
+              </div>
+              <div className="flex gap-2 px-4 mb-2">
+                <Link
+                  to="/profile"
+                  className="flex-1 text-center py-2.5 rounded-xl text-xs font-bold haptic"
+                  style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)', color: 'white' }}
+                >
+                  📁 Импортировать
+                </Link>
+                <Link
+                  to="/transactions/add"
+                  className="flex-1 text-center py-2.5 rounded-xl text-xs font-bold haptic"
+                  style={{ background: '#FFF0EB', color: '#FF6B35' }}
+                >
+                  + Добавить
+                </Link>
+              </div>
             </div>
           ) : (
             recentTxs.map((tx, i) => (
-              <motion.div
+              <motion.button
                 key={tx.id}
                 initial={{ opacity: 0, x: -10 }}
                 animate={{ opacity: 1, x: 0 }}
                 transition={{ delay: i * 0.05 }}
-                className="flex items-center gap-3 px-4 py-3 border-b border-gray-50 last:border-0"
+                className="w-full flex items-center gap-3 px-4 py-3 border-b border-gray-50 last:border-0 text-left haptic"
+                onClick={() => setEditingTx(tx)}
               >
-                <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl"
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl flex-shrink-0"
                   style={{ background: tx.type === 'income' ? '#E8FFF5' : '#FFF0EB' }}>
                   {tx.category?.icon ?? (tx.type === 'income' ? '💚' : '💸')}
                 </div>
@@ -688,14 +819,54 @@ export function DashboardPage() {
                     {new Date(tx.date).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })}
                   </div>
                 </div>
-                <div className={`font-bold text-sm ${tx.type === 'income' ? 'text-green-500' : 'text-red-500'}`}>
+                <div className={`font-bold text-sm flex-shrink-0 ${tx.type === 'income' ? 'text-green-500' : 'text-red-500'}`}>
                   {tx.type === 'income' ? '+' : '-'}{formatCurrency(tx.amount)}
                 </div>
-              </motion.div>
+              </motion.button>
             ))
           )}
         </div>
+
+        {/* Import nudge for users with few transactions */}
+        {!isNewUser && transactions.length < 10 && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 0.4 }}
+            className="mt-2"
+          >
+            <Link
+              to="/profile"
+              className="flex items-center gap-3 bg-white rounded-2xl px-4 py-3 haptic"
+              style={{ boxShadow: 'var(--shadow-card)' }}
+            >
+              <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg flex-shrink-0"
+                style={{ background: '#F0EEFF' }}>
+                📁
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="font-semibold text-gray-900 text-xs">Импортируй выписку</div>
+                <div className="text-xs text-gray-400">Аналитика станет точнее с полной историей</div>
+              </div>
+              <div className="text-gray-300 text-lg">›</div>
+            </Link>
+          </motion.div>
+        )}
       </div>
+
+      {/* Edit transaction sheet */}
+      <AnimatePresence>
+        {editingTx && (
+          <EditTransactionSheet
+            tx={editingTx}
+            onClose={() => setEditingTx(null)}
+            onDelete={() => {
+              deleteTransaction(editingTx.id);
+              setEditingTx(null);
+            }}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }
