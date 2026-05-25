@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { createPortal } from 'react-dom';
@@ -66,12 +66,14 @@ function periodRange(period: TxPeriod, customFrom: string, customTo: string): { 
 
 // ─── Edit Transaction Sheet ───────────────────────────────────────────────────
 
-function EditTransactionSheet({
+export function EditTransactionSheet({
   tx,
   onClose,
+  onDelete,
 }: {
   tx: Transaction;
   onClose: () => void;
+  onDelete?: () => void;
 }) {
   const { updateTransaction } = useFinanceStore();
 
@@ -82,9 +84,27 @@ function EditTransactionSheet({
   const [date, setDate] = useState(tx.date.slice(0, 10));
   const [showCatPicker, setShowCatPicker] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const cats = type === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
   const selectedCat = cats.find((c) => c.id === categoryId);
+
+  // Telegram BackButton: close sheet on back press
+  useEffect(() => {
+    const tg = window.Telegram?.WebApp;
+    if (!tg) return;
+    if (showCatPicker) {
+      tg.BackButton.show();
+      const handler = () => setShowCatPicker(false);
+      tg.BackButton.onClick(handler);
+      return () => { tg.BackButton.offClick(handler); tg.BackButton.hide(); };
+    } else {
+      tg.BackButton.show();
+      const handler = () => onClose();
+      tg.BackButton.onClick(handler);
+      return () => { tg.BackButton.offClick(handler); tg.BackButton.hide(); };
+    }
+  }, [showCatPicker, onClose]);
 
   // Keyboard-aware layout: listen to visualViewport resize
   useEffect(() => {
@@ -124,6 +144,18 @@ function EditTransactionSheet({
       ...(categoryChanged ? { userCorrected: true } : {}),
     });
     onClose();
+  };
+
+  const handleDelete = () => {
+    if (confirmDelete) {
+      window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('medium');
+      onDelete?.();
+      onClose();
+    } else {
+      setConfirmDelete(true);
+      window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light');
+      setTimeout(() => setConfirmDelete(false), 3000);
+    }
   };
 
   const isValid = parseFloat(amount.replace(',', '.')) > 0 && date;
@@ -202,6 +234,7 @@ function EditTransactionSheet({
                 defaultValue={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 className="w-full rounded-2xl border border-gray-200 px-4 py-3 text-lg font-bold text-gray-900 pr-12 focus:outline-none focus:border-purple-400"
+                style={{ fontSize: '16px' }}
                 placeholder="0"
               />
               <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 font-semibold">₽</span>
@@ -218,6 +251,7 @@ function EditTransactionSheet({
               defaultValue={description}
               onChange={(e) => setDescription(e.target.value)}
               className="w-full rounded-2xl border border-gray-200 px-4 py-3 text-sm text-gray-900 focus:outline-none focus:border-purple-400"
+              style={{ fontSize: '16px' }}
               placeholder="Например: Кофе в Starbucks"
             />
           </div>
@@ -249,8 +283,23 @@ function EditTransactionSheet({
               defaultValue={date}
               onChange={(e) => setDate(e.target.value)}
               className="w-full rounded-2xl border border-gray-200 px-4 py-3 text-sm text-gray-900 focus:outline-none focus:border-purple-400"
+              style={{ fontSize: '16px' }}
             />
           </div>
+
+          {/* Delete button — only shown when onDelete is provided */}
+          {onDelete && (
+            <button
+              onClick={handleDelete}
+              className="w-full py-3 rounded-2xl text-sm font-semibold haptic mt-2 transition-all"
+              style={{
+                background: confirmDelete ? '#EF4444' : '#FEE2E2',
+                color: confirmDelete ? '#fff' : '#EF4444',
+              }}
+            >
+              {confirmDelete ? '✓ Подтвердить удаление' : '🗑 Удалить операцию'}
+            </button>
+          )}
         </div>
       </motion.div>
 
@@ -302,138 +351,40 @@ function EditTransactionSheet({
   );
 }
 
-// ─── Swipeable Transaction Row ────────────────────────────────────────────────
+// ─── Tap Transaction Row ──────────────────────────────────────────────────────
 
-function SwipeableRow({
-  tx,
-  onEdit,
-  onDelete,
-}: {
-  tx: Transaction;
-  onEdit: () => void;
-  onDelete: () => void;
-}) {
-  const [swipeX, setSwipeX] = useState(0);
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const startXRef = useRef(0);
-  const startYRef = useRef(0);
-  const isDraggingRef = useRef(false);
-  const isHorizontalRef = useRef<boolean | null>(null);
-
-  const ACTION_PANEL_WIDTH = 140; // px — width of the revealed action panel
-  const SWIPE_THRESHOLD = 50;    // px — minimum swipe to reveal panel
-
-  const handleTouchStart = useCallback((e: React.TouchEvent) => {
-    startXRef.current = e.touches[0]!.clientX;
-    startYRef.current = e.touches[0]!.clientY;
-    isDraggingRef.current = true;
-    isHorizontalRef.current = null;
-  }, []);
-
-  const handleTouchMove = useCallback((e: React.TouchEvent) => {
-    if (!isDraggingRef.current) return;
-    const dx = e.touches[0]!.clientX - startXRef.current;
-    const dy = e.touches[0]!.clientY - startYRef.current;
-
-    // Determine scroll direction on first significant move
-    if (isHorizontalRef.current === null && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
-      isHorizontalRef.current = Math.abs(dx) > Math.abs(dy);
-    }
-
-    if (!isHorizontalRef.current) return; // vertical scroll — don't interfere
-
-    // Only allow left swipe (negative dx)
-    const clampedX = Math.max(-ACTION_PANEL_WIDTH, Math.min(0, dx + (swipeX < -SWIPE_THRESHOLD ? -ACTION_PANEL_WIDTH : 0)));
-    setSwipeX(clampedX);
-  }, [swipeX]);
-
-  const handleTouchEnd = useCallback(() => {
-    isDraggingRef.current = false;
-    if (swipeX < -SWIPE_THRESHOLD) {
-      setSwipeX(-ACTION_PANEL_WIDTH); // snap open
-    } else {
-      setSwipeX(0); // snap closed
-    }
-  }, [swipeX]);
-
-  const close = useCallback(() => setSwipeX(0), []);
-
-  const handleDelete = () => {
-    if (confirmDelete) {
-      onDelete();
-    } else {
-      setConfirmDelete(true);
-      setTimeout(() => setConfirmDelete(false), 3000);
-    }
-  };
-
+export function TxRow({ tx, onTap }: { tx: Transaction; onTap: () => void }) {
   return (
-    <div className="relative overflow-hidden border-b border-gray-50 last:border-0">
-      {/* Action panel — revealed on swipe */}
+    <div
+      onClick={onTap}
+      className="flex items-center gap-3 px-4 py-3 border-b border-gray-50 last:border-0 active:bg-gray-50 cursor-pointer transition-colors"
+    >
+      {/* Category icon */}
       <div
-        className="absolute right-0 top-0 bottom-0 flex items-stretch"
-        style={{ width: ACTION_PANEL_WIDTH }}
+        className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center text-xl flex-shrink-0"
+        style={{ boxShadow: '0 0 0 2px rgba(108,99,255,0.12)' }}
       >
-        <button
-          onClick={() => { close(); onEdit(); }}
-          className="flex-1 flex flex-col items-center justify-center gap-1 haptic"
-          style={{ background: '#6C63FF' }}
-        >
-          <span className="text-lg">✏️</span>
-          <span className="text-xs font-semibold text-white">Изменить</span>
-        </button>
-        <button
-          onClick={handleDelete}
-          className="flex-1 flex flex-col items-center justify-center gap-1 haptic transition-colors"
-          style={{ background: confirmDelete ? '#DC2626' : '#FF6B6B' }}
-        >
-          <span className="text-lg">{confirmDelete ? '✓' : '🗑️'}</span>
-          <span className="text-xs font-semibold text-white">{confirmDelete ? 'Точно?' : 'Удалить'}</span>
-        </button>
+        {tx.category?.icon ?? (tx.type === 'income' ? '💚' : '💸')}
       </div>
 
-      {/* Row content — slides left on swipe */}
-      <motion.div
-        animate={{ x: swipeX }}
-        transition={{ type: 'spring', damping: 30, stiffness: 400, mass: 0.8 }}
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
-        onClick={() => {
-          if (swipeX < -10) { close(); return; }
-          onEdit();
-        }}
-        className="flex items-center gap-3 px-4 py-3 bg-white active:bg-gray-50 transition-colors cursor-pointer"
-        style={{ touchAction: 'pan-y' }}
-      >
-        {/* Category icon */}
-        <div
-          className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center text-xl flex-shrink-0"
-          style={{ boxShadow: '0 0 0 2px rgba(108,99,255,0.12)' }}
-        >
-          {tx.category?.icon ?? (tx.type === 'income' ? '💚' : '💸')}
+      <div className="flex-1 min-w-0">
+        <div className="font-medium text-gray-900 truncate text-sm">
+          {tx.description || tx.category?.name || 'Операция'}
         </div>
+        <div className="text-xs text-gray-400 flex items-center gap-1">
+          <span>{tx.category?.name}</span>
+          {tx.userCorrected && (
+            <span className="text-purple-400 text-xs">· ✓ исправлено</span>
+          )}
+        </div>
+      </div>
 
-        <div className="flex-1 min-w-0">
-          <div className="font-medium text-gray-900 truncate text-sm">
-            {tx.description || tx.category?.name || 'Операция'}
-          </div>
-          <div className="text-xs text-gray-400 flex items-center gap-1">
-            <span>{tx.category?.name}</span>
-            {tx.userCorrected && (
-              <span className="text-purple-400 text-xs">· ✓ исправлено</span>
-            )}
-          </div>
+      <div className="flex items-center gap-1.5 flex-shrink-0">
+        <div className={`font-semibold text-sm ${tx.type === 'income' ? 'text-green-600' : 'text-red-500'}`}>
+          {tx.type === 'income' ? '+' : '−'}{formatCurrency(tx.amount)}
         </div>
-
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <div className={`font-semibold text-sm ${tx.type === 'income' ? 'text-green-600' : 'text-red-500'}`}>
-            {tx.type === 'income' ? '+' : '−'}{formatCurrency(tx.amount)}
-          </div>
-          {/* Swipe hint chevron */}
-          <span className="text-gray-300 text-xs select-none">‹</span>
-        </div>
-      </motion.div>
+        <span className="text-gray-300 text-xs select-none">›</span>
+      </div>
     </div>
   );
 }
@@ -654,14 +605,6 @@ export function TransactionsPage() {
         <div className="text-xs text-gray-400 px-1">Найдено: {filtered.length} транзакций</div>
       </div>
 
-      {/* Swipe hint */}
-      {filtered.length > 0 && (
-        <div className="mx-4 mt-2 mb-1 flex items-center gap-1.5 text-xs text-gray-400">
-          <span>←</span>
-          <span>Свайп влево — изменить или удалить</span>
-        </div>
-      )}
-
       {/* Transactions list */}
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
         {filtered.length === 0 ? (
@@ -700,10 +643,12 @@ export function TransactionsPage() {
                       exit={{ opacity: 0, x: 20, height: 0 }}
                       transition={{ delay: i * 0.03 }}
                     >
-                      <SwipeableRow
+                      <TxRow
                         tx={tx}
-                        onEdit={() => setEditTx(tx)}
-                        onDelete={() => deleteTransaction(tx.id)}
+                        onTap={() => {
+                          window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light');
+                          setEditTx(tx);
+                        }}
                       />
                     </motion.div>
                   ))}
@@ -720,6 +665,7 @@ export function TransactionsPage() {
           <EditTransactionSheet
             tx={editTx}
             onClose={() => setEditTx(null)}
+            onDelete={() => deleteTransaction(editTx.id)}
           />
         )}
       </AnimatePresence>

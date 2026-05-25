@@ -4,6 +4,8 @@ import { motion } from 'framer-motion';
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, LineChart, Line } from 'recharts';
 import { useFinanceStore, EXPENSE_CATEGORIES, type Transaction } from '@/features/finance/store';
 import { formatCurrency } from '@/shared/utils/format';
+import { RecategorizationSheet } from './profile/RecategorizationSheet';
+import type { Transaction } from '@/features/finance/store';
 
 const MONTHS = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
 type PeriodKey = 'month' | 'prev_month' | '3m' | '6m';
@@ -56,6 +58,31 @@ function categoryMap(txs: Transaction[]) {
   return map;
 }
 
+function OtherExpBanner({ pct, onNavigate }: { pct: number; onNavigate: () => void }) {
+  return (
+    <motion.button
+      initial={{ opacity: 0, y: -6 }}
+      animate={{ opacity: 1, y: 0 }}
+      onClick={onNavigate}
+      className="w-full text-left rounded-2xl p-4 haptic"
+      style={{ background: 'linear-gradient(135deg, #FFF7ED, #FFEDD5)', border: '1px solid rgba(249,115,22,0.2)' }}
+    >
+      <div className="flex items-start gap-3">
+        <span className="text-2xl flex-shrink-0">🗂️</span>
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-bold text-orange-700 mb-0.5">
+            {pct}% расходов без категории
+          </div>
+          <div className="text-xs text-orange-600 leading-snug">
+            Уточните {Math.min(30, useFinanceStore.getState().transactions.filter((t: Transaction) => t.categoryId === 'other_exp').length)} операций — аналитика станет точнее
+          </div>
+        </div>
+        <span className="text-orange-400 text-sm flex-shrink-0">›</span>
+      </div>
+    </motion.button>
+  );
+}
+
 function InsightCard({ icon, title, value, subtitle, color, bg }: {
   icon: string; title: string; value: string; subtitle?: string; color: string; bg: string;
 }) {
@@ -77,6 +104,7 @@ export function AnalyticsPage() {
   const [tab, setTab] = useState<'expenses' | 'dynamics'>('expenses');
   const [period, setPeriod] = useState<PeriodKey>((searchParams.get('period') as PeriodKey) ?? 'month');
   const [compare, setCompare] = useState(false);
+  const [showRecategorization, setShowRecategorization] = useState(false);
   const { transactions, getCategorySpending, getMonthSummary } = useFinanceStore();
 
   const summary = getMonthSummary();
@@ -134,6 +162,8 @@ export function AnalyticsPage() {
   });
 
   const totalExpenses = categorySpending.reduce((s, c) => s + c.amount, 0);
+  const otherExpAmount = categorySpending.find((c) => c.category.id === 'other_exp')?.amount ?? 0;
+  const otherExpPct = totalExpenses > 0 ? Math.round((otherExpAmount / totalExpenses) * 100) : 0;
   const topCategory = categorySpending[0];
   const biggestGrowth = comparisonRows.filter((r) => r.deltaPct !== null).sort((a, b) => (b.deltaPct ?? 0) - (a.deltaPct ?? 0))[0];
   const biggestDrop = comparisonRows.filter((r) => r.deltaPct !== null).sort((a, b) => (a.deltaPct ?? 0) - (b.deltaPct ?? 0))[0];
@@ -249,6 +279,12 @@ export function AnalyticsPage() {
             </div>
           ) : (
             <>
+              {otherExpPct >= 15 && (
+                <OtherExpBanner
+                  pct={otherExpPct}
+                  onNavigate={() => setShowRecategorization(true)}
+                />
+              )}
               <div className="bg-white rounded-2xl p-4" style={{ boxShadow: 'var(--shadow-card)' }}>
                 <div className="text-sm font-bold text-gray-800 mb-1">Структура расходов</div>
                 <div className="text-xs text-gray-400 mb-3">Всего: {formatCurrency(totalExpenses)}</div>
@@ -304,6 +340,9 @@ export function AnalyticsPage() {
             </ResponsiveContainer>
           )}
         </div>
+      )}
+      {showRecategorization && (
+        <RecategorizationSheet onClose={() => setShowRecategorization(false)} />
       )}
     </div>
   );

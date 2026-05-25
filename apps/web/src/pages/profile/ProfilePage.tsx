@@ -120,35 +120,67 @@ type ImportResult = {
 //      Coverage = (total expense amount - other_exp amount) / total expense amount
 //   4. Hard cap at MAX_CLARIFY questions to avoid fatigue.
 
-const MAX_CLARIFY = 15;
-const MIN_CLARIFY_AMOUNT = 1000;
+const MAX_CLARIFY = 30;
+// MIN_CLARIFY_AMOUNT removed - selection now based on 90% coverage algorithm
 
 /**
  * Given newly imported transactions, compute which ones to ask about.
  *
- * Strategy: show ALL newly imported other_exp / other_inc transactions
- * with amount ≥ MIN_CLARIFY_AMOUNT, sorted by amount descending, capped
- * at MAX_CLARIFY to avoid fatigue.
+ * Strategy: greedy 90%-coverage algorithm.
+ *   1. Compute total expense amount for the imported batch.
+ *   2. Compute already-categorized expense amount (not other_exp).
+ *   3. Sort other_exp / other_inc candidates by amount descending.
+ *   4. Add candidates one by one until covered ≥ 90% of total expenses
+ *      OR we hit MAX_CLARIFY questions.
+ *   5. Always include other_inc candidates (they don't affect coverage math
+ *      but are still worth clarifying), appended after expense candidates.
  *
- * We no longer use the greedy 90%-coverage heuristic here — that caused
- * only 1 question to be shown when a single large transaction covered the
- * gap. The wizard is a full onboarding flow, so we want to clarify as many
- * uncategorized transactions as reasonably possible.
+ * This ensures the user answers the minimum number of questions needed to
+ * reach 90% categorization coverage, avoiding fatigue on large imports.
  */
 function computeClarifyQueue(
   newTxs: import('@/features/finance/store').Transaction[],
   _allTxs: import('@/features/finance/store').Transaction[],
 ): string[] {
-  return newTxs
-    .filter(
-      (t) =>
-        (t.categoryId === 'other_exp' || t.categoryId === 'other_inc') &&
-        t.amount >= MIN_CLARIFY_AMOUNT,
-    )
-    .sort((a, b) => b.amount - a.amount)
-    .slice(0, MAX_CLARIFY)
-    .map((t) => t.id);
+  const totalExpenses = newTxs
+    .filter((t) => t.type === 'expense')
+    .reduce((sum, t) => sum + t.amount, 0);
+
+  const alreadyCategorized = newTxs
+    .filter((t) => t.type === 'expense' && t.categoryId !== 'other_exp')
+    .reduce((sum, t) => sum + t.amount, 0);
+
+  const target = totalExpenses * 0.9;
+  let covered = alreadyCategorized;
+  const queue: string[] = [];
+
+  // Expense candidates sorted by amount descending
+  // Removed MIN_CLARIFY_AMOUNT filter - now using 90% coverage algorithm
+  const expenseCandidates = newTxs
+    .filter((t) => t.categoryId === 'other_exp')
+    .sort((a, b) => b.amount - a.amount);
+
+  for (const tx of expenseCandidates) {
+    if (covered >= target || queue.length >= MAX_CLARIFY) break;
+    queue.push(tx.id);
+    covered += tx.amount;
+  }
+
+  // Income candidates — always worth clarifying, append after expense ones
+  // Removed MIN_CLARIFY_AMOUNT filter - now using 90% coverage algorithm
+  const incomeCandidates = newTxs
+    .filter((t) => t.categoryId === 'other_inc')
+    .sort((a, b) => b.amount - a.amount);
+
+  for (const tx of incomeCandidates) {
+    if (queue.length >= MAX_CLARIFY) break;
+    queue.push(tx.id);
+  }
+
+  return queue;
 }
+
+export { ClarifyCategoryStep };
 
 const CLARIFY_EXPENSE_CATS = [
   { id: 'food',          icon: '🍔', name: 'Еда' },

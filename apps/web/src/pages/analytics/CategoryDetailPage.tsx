@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { useFinanceStore, EXPENSE_CATEGORIES, type Transaction } from '@/features/finance/store';
 import { formatCurrency } from '@/shared/utils/format';
+import { TxRow, EditTransactionSheet } from '@/pages/transactions/TransactionsPage';
 
 type PeriodKey = 'month' | 'prev_month' | '3m' | '6m';
 
@@ -44,85 +45,6 @@ function weekLabel(isoDate: string): string {
   return `${d.getDate()}.${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
-// EditTransactionSheet (inline, minimal — reuses same pattern as TransactionsPage)
-function EditSheet({
-  tx,
-  onClose,
-  onSave,
-}: {
-  tx: Transaction;
-  onClose: () => void;
-  onSave: (id: string, updates: Partial<Transaction>) => void;
-}) {
-  const [amount, setAmount] = useState(String(tx.amount));
-  const [description, setDescription] = useState(tx.description);
-
-  const handleSave = () => {
-    const parsed = parseFloat(amount);
-    if (!parsed || parsed <= 0) return;
-    onSave(tx.id, { amount: parsed, description });
-    onClose();
-  };
-
-  return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 z-50 flex items-end"
-      style={{ background: 'rgba(0,0,0,0.4)' }}
-      onClick={onClose}
-    >
-      <motion.div
-        initial={{ y: '100%' }}
-        animate={{ y: 0 }}
-        exit={{ y: '100%' }}
-        transition={{ type: 'spring', damping: 30, stiffness: 300 }}
-        className="w-full bg-white rounded-t-3xl p-6 space-y-4"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="w-10 h-1 bg-gray-200 rounded-full mx-auto mb-2" />
-        <h3 className="text-lg font-bold text-gray-900">Редактировать транзакцию</h3>
-        <div className="space-y-3">
-          <div>
-            <label className="text-xs text-gray-500 font-medium mb-1 block">Сумма</label>
-            <input
-              type="number"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              className="w-full bg-gray-50 rounded-xl px-4 py-3 text-[16px] font-semibold outline-none"
-              style={{ fontSize: '16px' }}
-            />
-          </div>
-          <div>
-            <label className="text-xs text-gray-500 font-medium mb-1 block">Описание</label>
-            <input
-              type="text"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              className="w-full bg-gray-50 rounded-xl px-4 py-3 text-[16px] outline-none"
-              style={{ fontSize: '16px' }}
-            />
-          </div>
-        </div>
-        <div className="flex gap-3 pt-2">
-          <button onClick={onClose} className="flex-1 py-3 rounded-2xl bg-gray-100 text-gray-600 font-semibold haptic">
-            Отмена
-          </button>
-          <motion.button
-            whileTap={{ scale: 0.97 }}
-            onClick={handleSave}
-            className="flex-1 py-3 rounded-2xl font-semibold text-white haptic"
-            style={{ background: 'linear-gradient(135deg, #6C63FF, #8B5CF6)' }}
-          >
-            Сохранить
-          </motion.button>
-        </div>
-      </motion.div>
-    </motion.div>
-  );
-}
-
 export function CategoryDetailPage() {
   const { categoryId } = useParams<{ categoryId: string }>();
   const navigate = useNavigate();
@@ -130,7 +52,7 @@ export function CategoryDetailPage() {
   const period = (searchParams.get('period') as PeriodKey) ?? 'month';
   const [editTx, setEditTx] = useState<Transaction | null>(null);
 
-  const { transactions, updateTransaction } = useFinanceStore();
+  const { transactions, deleteTransaction } = useFinanceStore();
 
   // Find category info — check both expense and income categories
   const allCategories = [
@@ -167,6 +89,20 @@ export function CategoryDetailPage() {
   }, [filteredTxs]);
 
   const showChart = weeklyData.length > 1;
+
+  // Group transactions by date label
+  const grouped = useMemo(() => {
+    return filteredTxs.reduce<Record<string, Transaction[]>>((acc, tx) => {
+      const label = new Date(tx.date).toLocaleDateString('ru-RU', {
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric',
+      });
+      if (!acc[label]) acc[label] = [];
+      acc[label]!.push(tx);
+      return acc;
+    }, {});
+  }, [filteredTxs]);
 
   // Redirect if category not found
   if (!category) {
@@ -250,58 +186,55 @@ export function CategoryDetailPage() {
           </motion.div>
         )}
 
-        {/* Transaction list */}
-        <div className="bg-white rounded-2xl overflow-hidden shadow-sm">
-          <div className="px-4 py-3 border-b border-gray-50">
-            <span className="text-sm font-bold text-gray-800">Транзакции</span>
-            <span className="ml-2 text-xs text-gray-400">{filteredTxs.length} шт.</span>
-          </div>
-
-          {filteredTxs.length === 0 ? (
+        {/* Transaction list — grouped by date */}
+        {filteredTxs.length === 0 ? (
+          <div className="bg-white rounded-2xl overflow-hidden shadow-sm">
+            <div className="px-4 py-3 border-b border-gray-50">
+              <span className="text-sm font-bold text-gray-800">Транзакции</span>
+              <span className="ml-2 text-xs text-gray-400">0 шт.</span>
+            </div>
             <div className="text-center py-12 text-gray-400">
               <div className="text-3xl mb-2">🔍</div>
               <div className="text-sm">Нет транзакций в этой категории за выбранный период</div>
             </div>
-          ) : (
-            <AnimatePresence>
-              {filteredTxs.map((tx, i) => (
-                <motion.div
-                  key={tx.id}
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: i * 0.03 }}
-                  className="flex items-center gap-3 px-4 py-3 border-b border-gray-50 last:border-0 haptic active:bg-gray-50"
-                  onClick={() => setEditTx(tx)}
-                >
-                  <div
-                    className="w-10 h-10 rounded-xl flex items-center justify-center text-lg flex-shrink-0"
-                    style={{ backgroundColor: (category as { color?: string }).color ? (category as { color: string }).color + '18' : '#F3F4F6' }}
-                  >
-                    {category.icon}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-semibold text-gray-800 truncate">{tx.description || category.name}</div>
-                    <div className="text-xs text-gray-400">
-                      {new Date(tx.date).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })}
-                    </div>
-                  </div>
-                  <div className={`text-sm font-bold ${tx.type === 'income' ? 'text-green-600' : 'text-gray-900'}`}>
-                    {tx.type === 'income' ? '+' : '−'}{formatCurrency(tx.amount)}
-                  </div>
-                </motion.div>
-              ))}
-            </AnimatePresence>
-          )}
-        </div>
+          </div>
+        ) : (
+          Object.entries(grouped).map(([dateLabel, txs]) => (
+            <div key={dateLabel}>
+              <div className="text-xs font-semibold text-gray-400 uppercase mb-2 px-1">{dateLabel}</div>
+              <div className="bg-white rounded-2xl overflow-hidden shadow-sm">
+                <AnimatePresence>
+                  {txs.map((tx, i) => (
+                    <motion.div
+                      key={tx.id}
+                      initial={{ opacity: 0, x: -10 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: 20, height: 0 }}
+                      transition={{ delay: i * 0.03 }}
+                    >
+                      <TxRow
+                        tx={tx}
+                        onTap={() => {
+                          window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light');
+                          setEditTx(tx);
+                        }}
+                      />
+                    </motion.div>
+                  ))}
+                </AnimatePresence>
+              </div>
+            </div>
+          ))
+        )}
       </div>
 
-      {/* Edit sheet */}
+      {/* Edit sheet — full EditTransactionSheet with delete */}
       <AnimatePresence>
         {editTx && (
-          <EditSheet
+          <EditTransactionSheet
             tx={editTx}
             onClose={() => setEditTx(null)}
-            onSave={(id, updates) => updateTransaction(id, updates)}
+            onDelete={() => deleteTransaction(editTx.id)}
           />
         )}
       </AnimatePresence>
