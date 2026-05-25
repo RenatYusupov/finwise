@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuthStore } from '@/features/auth/store';
-import { useFinanceStore, debugCloudStorage, rehydrateFromCloud, forceSyncToCloud, clearCloudStorage, cancelScheduledUpload } from '@/features/finance/store';
+import { useFinanceStore, cancelScheduledUpload, forceSyncToCloud } from '@/features/finance/store';
 import { useUIStore } from '@/features/ui/store';
 import { formatCurrency } from '@/shared/utils/format';
 import { parseBankXLSX, parseTbankPDF, parseCSV, rowToTransactionGeneric } from './bankImport';
@@ -21,7 +21,6 @@ const VALID_CATEGORY_IDS = new Set([
 async function recategorizeWithGroq(transactions: ParsedBankTx[]): Promise<ParsedBankTx[]> {
   if (transactions.length === 0) return transactions;
 
-  // Only send transactions that were NOT already confidently categorized by MCC/keyword.
   const needsGroq = transactions
     .map((tx, idx) => ({ tx, idx }))
     .filter(({ tx }) => !tx.categoryConfident);
@@ -36,7 +35,6 @@ async function recategorizeWithGroq(transactions: ParsedBankTx[]): Promise<Parse
   const result: ParsedBankTx[] = [...transactions];
 
   try {
-    // Send all uncategorized transactions to backend in one request (backend handles batching)
     const payload = needsGroq.map((item, batchIdx) => ({
       idx: batchIdx,
       description: item.tx.description || '',
@@ -59,7 +57,6 @@ async function recategorizeWithGroq(transactions: ParsedBankTx[]): Promise<Parse
         item.idx < needsGroq.length &&
         VALID_CATEGORY_IDS.has(item.categoryId)
       ) {
-        // Map batch index back to original transaction index
         const origIdx = needsGroq[item.idx]!.idx;
         const orig = result[origIdx]!;
         result[origIdx] = {
@@ -82,61 +79,144 @@ async function recategorizeWithGroq(transactions: ParsedBankTx[]): Promise<Parse
 
 // ─── Achievements ─────────────────────────────────────────────────────────────
 
-const ACHIEVEMENTS = [
-  { id: 'first_tx', icon: '🎯', name: 'Первая трата', desc: 'Добавь первую операцию', check: (s: any) => s.transactions.length >= 1 },
-  { id: 'saver', icon: '💰', name: 'Копилка', desc: 'Сбережения > 20%', check: (s: any) => s.getMonthSummary().savingsRate >= 20 },
-  { id: 'goal_setter', icon: '🌟', name: 'Целеустремлённый', desc: 'Создай первую цель', check: (s: any) => s.goals.length >= 1 },
-  { id: 'goal_done', icon: '🏆', name: 'Достигатор', desc: 'Выполни цель на 100%', check: (s: any) => s.goals.some((g: any) => g.currentAmount >= g.targetAmount) },
-  { id: 'streak_3', icon: '🔥', name: 'Огонь', desc: '3 дня подряд', check: (s: any) => s.streak >= 3 },
-  { id: 'streak_7', icon: '⚡', name: 'Молния', desc: '7 дней подряд', check: (s: any) => s.streak >= 7 },
-  { id: 'tx_10', icon: '📊', name: 'Аналитик', desc: '10 операций', check: (s: any) => s.transactions.length >= 10 },
-  { id: 'tx_50', icon: '💎', name: 'Профи', desc: '50 операций', check: (s: any) => s.transactions.length >= 50 },
-  { id: 'big_saver', icon: '👑', name: 'Бриллиант', desc: 'Накопи 100 000 ₽', check: (s: any) => s.goals.some((g: any) => g.currentAmount >= 100000) },
+type StoreSnapshot = ReturnType<typeof useFinanceStore.getState>;
+
+interface Achievement {
+  id: string;
+  icon: string;
+  name: string;
+  desc: string;
+  check: (s: StoreSnapshot) => boolean;
+  getProgress: (s: StoreSnapshot) => { current: number; target: number; label: string } | null;
+}
+
+const ACHIEVEMENTS: Achievement[] = [
+  {
+    id: 'first_tx',
+    icon: '🎯',
+    name: 'Первая трата',
+    desc: 'Добавь первую операцию',
+    check: (s) => s.transactions.length >= 1,
+    getProgress: (s) => ({
+      current: Math.min(s.transactions.length, 1),
+      target: 1,
+      label: `${Math.min(s.transactions.length, 1)} из 1 операции`,
+    }),
+  },
+  {
+    id: 'saver',
+    icon: '💰',
+    name: 'Копилка',
+    desc: 'Сбережения > 20%',
+    check: (s) => s.getMonthSummary().savingsRate >= 20,
+    getProgress: (s) => {
+      const rate = Math.max(0, s.getMonthSummary().savingsRate);
+      return { current: Math.min(rate, 20), target: 20, label: `${Math.round(rate)}% из 20%` };
+    },
+  },
+  {
+    id: 'goal_setter',
+    icon: '🌟',
+    name: 'Целеустремлённый',
+    desc: 'Создай первую цель',
+    check: (s) => s.goals.length >= 1,
+    getProgress: (s) => ({
+      current: Math.min(s.goals.length, 1),
+      target: 1,
+      label: `${Math.min(s.goals.length, 1)} из 1 цели`,
+    }),
+  },
+  {
+    id: 'goal_done',
+    icon: '🏆',
+    name: 'Достигатор',
+    desc: 'Выполни цель на 100%',
+    check: (s) => s.goals.some((g) => g.currentAmount >= g.targetAmount),
+    getProgress: (s) => {
+      if (s.goals.length === 0) return null;
+      const best = s.goals.reduce((max, g) => {
+        const pct = g.targetAmount > 0 ? g.currentAmount / g.targetAmount : 0;
+        return pct > max ? pct : max;
+      }, 0);
+      return {
+        current: Math.round(best * 100),
+        target: 100,
+        label: `Лучшая цель: ${Math.round(best * 100)}%`,
+      };
+    },
+  },
+  {
+    id: 'streak_3',
+    icon: '🔥',
+    name: 'Огонь',
+    desc: '3 дня подряд',
+    check: (s) => s.streak >= 3,
+    getProgress: (s) => ({
+      current: Math.min(s.streak, 3),
+      target: 3,
+      label: `${Math.min(s.streak, 3)} из 3 дней`,
+    }),
+  },
+  {
+    id: 'streak_7',
+    icon: '⚡',
+    name: 'Молния',
+    desc: '7 дней подряд',
+    check: (s) => s.streak >= 7,
+    getProgress: (s) => ({
+      current: Math.min(s.streak, 7),
+      target: 7,
+      label: `${Math.min(s.streak, 7)} из 7 дней`,
+    }),
+  },
+  {
+    id: 'tx_10',
+    icon: '📊',
+    name: 'Аналитик',
+    desc: '10 операций',
+    check: (s) => s.transactions.length >= 10,
+    getProgress: (s) => ({
+      current: Math.min(s.transactions.length, 10),
+      target: 10,
+      label: `${Math.min(s.transactions.length, 10)} из 10 операций`,
+    }),
+  },
+  {
+    id: 'tx_50',
+    icon: '💎',
+    name: 'Профи',
+    desc: '50 операций',
+    check: (s) => s.transactions.length >= 50,
+    getProgress: (s) => ({
+      current: Math.min(s.transactions.length, 50),
+      target: 50,
+      label: `${Math.min(s.transactions.length, 50)} из 50 операций`,
+    }),
+  },
+  {
+    id: 'big_saver',
+    icon: '👑',
+    name: 'Бриллиант',
+    desc: 'Накопи 100 000 ₽',
+    check: (s) => s.goals.some((g) => g.currentAmount >= 100000),
+    getProgress: (s) => {
+      const best = s.goals.reduce((max, g) => (g.currentAmount > max ? g.currentAmount : max), 0);
+      return {
+        current: Math.min(best, 100000),
+        target: 100000,
+        label: `${formatCurrency(Math.min(best, 100000))} из ${formatCurrency(100000)}`,
+      };
+    },
+  },
 ];
 
-// ─── File Import Modal ────────────────────────────────────────────────────────
-
-type ImportResult = {
-  imported: number;
-  skipped: number;
-  /** Transactions skipped because they were exact duplicates */
-  dedupSkipped?: number;
-  errors: string[];
-  bankName?: string;
-  /** Transactions categorized by MCC/keyword — did NOT need Groq */
-  preCategCount?: number;
-  /** Transactions that were sent to Groq */
-  needsGroqCount?: number;
-};
-
 // ─── Category Clarification Step ─────────────────────────────────────────────
-// Shown after import result for transactions that need clarification.
-//
-// Selection logic:
-//   1. Only transactions with amount ≥ MIN_CLARIFY_AMOUNT (5000 ₽)
-//   2. Only other_exp / other_inc (truly uncategorized)
-//   3. Ask the minimum number needed to reach 90% category coverage
-//      within the current month's expense amount.
-//      Coverage = (total expense amount - other_exp amount) / total expense amount
-//   4. Hard cap at MAX_CLARIFY questions to avoid fatigue.
 
 const MAX_CLARIFY = 30;
-// MIN_CLARIFY_AMOUNT removed - selection now based on 90% coverage algorithm
 
 /**
- * Given newly imported transactions, compute which ones to ask about.
- *
- * Strategy: greedy 90%-coverage algorithm.
- *   1. Compute total expense amount for the imported batch.
- *   2. Compute already-categorized expense amount (not other_exp).
- *   3. Sort other_exp / other_inc candidates by amount descending.
- *   4. Add candidates one by one until covered ≥ 90% of total expenses
- *      OR we hit MAX_CLARIFY questions.
- *   5. Always include other_inc candidates (they don't affect coverage math
- *      but are still worth clarifying), appended after expense candidates.
- *
- * This ensures the user answers the minimum number of questions needed to
- * reach 90% categorization coverage, avoiding fatigue on large imports.
+ * Greedy 90%-coverage algorithm.
+ * Selects minimum set of transactions to clarify to reach 90% category coverage.
  */
 function computeClarifyQueue(
   newTxs: import('@/features/finance/store').Transaction[],
@@ -154,8 +234,6 @@ function computeClarifyQueue(
   let covered = alreadyCategorized;
   const queue: string[] = [];
 
-  // Expense candidates sorted by amount descending
-  // Removed MIN_CLARIFY_AMOUNT filter - now using 90% coverage algorithm
   const expenseCandidates = newTxs
     .filter((t) => t.categoryId === 'other_exp')
     .sort((a, b) => b.amount - a.amount);
@@ -166,8 +244,6 @@ function computeClarifyQueue(
     covered += tx.amount;
   }
 
-  // Income candidates — always worth clarifying, append after expense ones
-  // Removed MIN_CLARIFY_AMOUNT filter - now using 90% coverage algorithm
   const incomeCandidates = newTxs
     .filter((t) => t.categoryId === 'other_inc')
     .sort((a, b) => b.amount - a.amount);
@@ -221,7 +297,6 @@ function ClarifyCategoryStep({
     .filter(Boolean) as import('@/features/finance/store').Transaction[];
 
   if (queue.length === 0 || index >= queue.length) {
-    // All done — call onDone on next tick to avoid render-during-render
     setTimeout(onDone, 0);
     return null;
   }
@@ -261,7 +336,6 @@ function ClarifyCategoryStep({
         transition={{ duration: 0.22 }}
         className="py-2"
       >
-        {/* Progress */}
         <div className="flex items-center justify-between mb-4">
           <span className="text-xs text-gray-400">Уточните категорию</span>
           <span className="text-xs font-semibold text-purple-500">{progress} / {total}</span>
@@ -276,7 +350,6 @@ function ClarifyCategoryStep({
           ))}
         </div>
 
-        {/* Transaction card */}
         <div
           className="rounded-2xl p-4 mb-5"
           style={{ background: 'linear-gradient(135deg, #F0EEFF, #E8E4FF)' }}
@@ -297,7 +370,6 @@ function ClarifyCategoryStep({
           </div>
         </div>
 
-        {/* Category chips */}
         <div className="grid grid-cols-3 gap-2 mb-4">
           {cats.map((cat) => (
             <motion.button
@@ -316,11 +388,7 @@ function ClarifyCategoryStep({
           ))}
         </div>
 
-        {/* Skip */}
-        <button
-          onClick={skip}
-          className="w-full py-2 text-xs text-gray-400 haptic"
-        >
+        <button onClick={skip} className="w-full py-2 text-xs text-gray-400 haptic">
           Пропустить →
         </button>
       </motion.div>
@@ -329,6 +397,16 @@ function ClarifyCategoryStep({
 }
 
 // ─── File Import Modal ────────────────────────────────────────────────────────
+
+type ImportResult = {
+  imported: number;
+  skipped: number;
+  dedupSkipped?: number;
+  errors: string[];
+  bankName?: string;
+  preCategCount?: number;
+  needsGroqCount?: number;
+};
 
 function FileImportModal({ onClose }: { onClose: () => void }) {
   const { addTransactionsBatch, transactions: allTransactions } = useFinanceStore();
@@ -340,9 +418,7 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStep, setProcessingStep] = useState('');
   const [dragOver, setDragOver] = useState(false);
-  /** IDs of imported transactions that need category clarification */
   const [clarifyIds, setClarifyIds] = useState<string[]>([]);
-  /** Whether we're in the post-import wizard (after result screen) */
   const [wizarding, setWizarding] = useState(false);
 
   useEffect(() => {
@@ -350,7 +426,6 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
     return () => closeModal();
   }, [openModal, closeModal]);
 
-  // Block background scroll in Telegram WebView (passive:false required for preventDefault)
   useEffect(() => {
     const overlay = overlayRef.current;
     if (!overlay) return;
@@ -361,6 +436,9 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
     overlay.addEventListener('touchmove', prevent, { passive: false });
     return () => overlay.removeEventListener('touchmove', prevent);
   }, []);
+
+  // allTransactions is used by computeClarifyQueue — keep ref to avoid stale closure
+  void allTransactions;
 
   const processFile = async (file: File) => {
     if (!file) return;
@@ -388,7 +466,6 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
 
         const { transactions, bankName, skipped } = parseResult;
 
-        // Count how many are already confidently categorized (MCC / keyword / Alfa text)
         const preCategCount = transactions.filter((t) => t.categoryConfident).length;
         const needsGroqCount = transactions.length - preCategCount;
 
@@ -402,26 +479,18 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
           }
         } else if (transactions.length > 0) {
           setProcessingStep('✅ Все категории определены по MCC/ключевым словам');
-          // Small delay so user sees the message
           await new Promise((r) => setTimeout(r, 600));
         }
 
-        // Snapshot IDs before import so we can identify newly added transactions
         const idsBefore = new Set(useFinanceStore.getState().transactions.map((t) => t.id));
 
         const { imported, skipped: dedupSkipped } = addTransactionsBatch(finalTransactions);
 
-        // Fire cloud sync in the background — do NOT await it.
-        // Data is already safely in localStorage at this point.
-        // Awaiting forceSyncToCloud() with 1500 transactions blocks the UI for
-        // 10–30s while each chunk round-trips to Telegram CloudStorage.
         if (imported > 0) {
-          cancelScheduledUpload(); // cancel pending debounce to avoid double-write
-          forceSyncToCloud().catch(() => {/* ignore — local data is safe */});
+          cancelScheduledUpload();
+          forceSyncToCloud().catch(() => {});
         }
 
-        // Compute which newly imported transactions need category clarification.
-        // Uses 90% monthly coverage logic — only asks the minimum needed.
         const stateAfter = useFinanceStore.getState();
         const newTxs = stateAfter.transactions.filter((t) => !idsBefore.has(t.id));
         const toAsk = computeClarifyQueue(newTxs, stateAfter.transactions);
@@ -504,20 +573,14 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
         style={{ maxHeight: '88vh', display: 'flex', flexDirection: 'column' }}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Drag handle — fixed, not scrollable */}
         <div className="flex-shrink-0 pt-4 pb-2 px-6">
           <div className="w-10 h-1 bg-gray-200 rounded-full mx-auto" />
         </div>
 
-        {/* Scrollable content area */}
         <div
           ref={scrollRef}
           className="flex-1 overflow-y-auto px-6 pb-4"
-          style={{
-            WebkitOverflowScrolling: 'touch',
-            overscrollBehavior: 'none',
-            touchAction: 'pan-y',
-          }}
+          style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'none', touchAction: 'pan-y' }}
         >
           {!result ? (
             <>
@@ -615,19 +678,19 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
                   <div className="text-sm font-bold text-green-700 mb-1">✅ Что сделано</div>
                   <div className="text-xs text-green-600 leading-relaxed space-y-1">
                     {(result.preCategCount ?? 0) > 0 && (
-                        <div>• {result.preCategCount} транзакций категоризированы по MCC/ключевым словам</div>
-                      )}
-                      {(result.needsGroqCount ?? 0) > 0 && (
-                        <div>• {result.needsGroqCount} транзакций уточнены через Groq AI</div>
-                      )}
-                      {(result.needsGroqCount ?? 0) === 0 && (result.preCategCount ?? 0) > 0 && (
-                        <div>• Groq AI не потребовался — все категории определены точно</div>
-                      )}
-                      {(result.dedupSkipped ?? 0) > 0 && (
-                        <div>• {result.dedupSkipped} дублей автоматически пропущено</div>
-                      )}
-                      <div>• Внутренние переводы между счетами пропущены</div>
-                      <div>• Описания очищены от технических данных</div>
+                      <div>• {result.preCategCount} транзакций категоризированы по MCC/ключевым словам</div>
+                    )}
+                    {(result.needsGroqCount ?? 0) > 0 && (
+                      <div>• {result.needsGroqCount} транзакций уточнены через Groq AI</div>
+                    )}
+                    {(result.needsGroqCount ?? 0) === 0 && (result.preCategCount ?? 0) > 0 && (
+                      <div>• Groq AI не потребовался — все категории определены точно</div>
+                    )}
+                    {(result.dedupSkipped ?? 0) > 0 && (
+                      <div>• {result.dedupSkipped} дублей автоматически пропущено</div>
+                    )}
+                    <div>• Внутренние переводы между счетами пропущены</div>
+                    <div>• Описания очищены от технических данных</div>
                   </div>
                 </div>
               )}
@@ -642,16 +705,11 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
             </div>
           )}
 
-          {/* Post-import wizard — shown after result screen */}
           {wizarding && (
-            <PostImportWizard
-              clarifyIds={clarifyIds}
-              onDone={onClose}
-            />
+            <PostImportWizard clarifyIds={clarifyIds} onDone={onClose} />
           )}
         </div>
 
-        {/* Fixed footer — always visible, never scrolls away */}
         {result && !wizarding && (
           <div
             className="flex-shrink-0 px-6 pt-3 border-t border-gray-100"
@@ -683,269 +741,186 @@ function FileImportModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-// ─── Cloud Sync Debug Panel ───────────────────────────────────────────────────
+// ─── Notification Bottom Sheet (TASK-020) ────────────────────────────────────
 
-function CloudSyncPanel({ localTxCount }: { localTxCount: number }) {
-  const [status, setStatus] = useState<string>('Нажмите "Проверить" для диагностики');
-  const [loading, setLoading] = useState(false);
-  const [cloudTxCount, setCloudTxCount] = useState<number | null>(null);
+function NotificationSheet({ onClose }: { onClose: () => void }) {
+  const { notificationSettings, updateNotificationSettings } = useFinanceStore();
+  const { openModal, closeModal } = useUIStore();
+  const overlayRef = useRef<HTMLDivElement>(null);
 
-  const check = async () => {
-    setLoading(true);
-    setStatus('Проверяем...');
-    const info = await debugCloudStorage();
-    if (!info.available) {
-      setStatus('❌ CloudStorage недоступен на этом устройстве\n(Telegram Desktop старой версии или браузер)');
-      setCloudTxCount(null);
-    } else if (info.error) {
-      setStatus(`❌ Ошибка чтения: ${info.error}\n⚠️ Данные в облаке повреждены — нажмите "Сбросить облако" затем "↑ В облако"`);
-      setCloudTxCount(0);
-    } else {
-      const ct = info.txCount ?? 0;
-      setCloudTxCount(ct);
-      setStatus(
-        `☁️ Cloud: ${ct} транзакций\n📱 Local: ${localTxCount} транзакций`
-      );
-    }
-    setLoading(false);
-  };
+  useEffect(() => {
+    openModal();
+    return () => closeModal();
+  }, [openModal, closeModal]);
 
-  // Pull from cloud → merge into local (safe: only adds, never removes)
-  const pullFromCloud = async () => {
-    setLoading(true);
-    setStatus('Загружаем из облака...');
-    await rehydrateFromCloud().catch(() => {});
-    setStatus(`✅ Данные из облака загружены\n📱 Local: ${localTxCount} транзакций`);
-    setLoading(false);
-  };
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const prevent = (e: TouchEvent) => { e.preventDefault(); };
+    overlay.addEventListener('touchmove', prevent, { passive: false });
+    return () => overlay.removeEventListener('touchmove', prevent);
+  }, []);
 
-  // Clear corrupted cloud data, then re-upload local data cleanly
-  const resetAndPush = async () => {
-    setLoading(true);
-    setStatus('Очищаем облако...');
-    await clearCloudStorage().catch(() => {});
-    setStatus('Записываем данные в облако...');
-    const result = await forceSyncToCloud().catch(() => '❌ Ошибка записи');
-    setStatus(result);
-    setLoading(false);
-  };
+  const settings = [
+    {
+      key: 'budgetAlerts' as const,
+      label: 'Превышение бюджета',
+      icon: '⚠️',
+      desc: 'Когда расходы достигают 80% или 100% лимита',
+    },
+    {
+      key: 'recurringReminders' as const,
+      label: 'Регулярные платежи',
+      icon: '📅',
+      desc: 'Напоминание за 3 дня до платежа',
+    },
+    {
+      key: 'weeklyReport' as const,
+      label: 'Еженедельный отчёт',
+      icon: '📊',
+      desc: 'Итоги недели каждое воскресенье в 21:00',
+    },
+    {
+      key: 'aiInsights' as const,
+      label: 'AI-инсайты',
+      icon: '🤖',
+      desc: 'Персональные советы от FinWise AI',
+    },
+  ];
 
-  // Push local → cloud (upload this device's data)
-  const pushToCloud = async () => {
-    setLoading(true);
-    setStatus('Загружаем в облако...');
-    const result = await forceSyncToCloud().catch(() => '❌ Ошибка');
-    setStatus(result);
-    setLoading(false);
-  };
+  const allEnabled = settings.every((s) => notificationSettings[s.key]);
 
-  return (
-    <div className="bg-white rounded-2xl p-4" style={{ boxShadow: 'var(--shadow-card)', border: '1px solid rgba(108,99,255,0.15)' }}>
-      <div className="text-sm font-bold text-gray-800 mb-1">☁️ Синхронизация</div>
-      <div className="text-xs text-gray-400 mb-2">Данные синхронизируются между устройствами через Telegram CloudStorage</div>
-      <div className="text-xs text-gray-600 whitespace-pre-line mb-3 min-h-[2.5rem] p-2 rounded-xl" style={{ background: '#F8F7FF' }}>{status}</div>
-      <div className="flex gap-2 flex-wrap">
-        <button
-          onClick={check}
-          disabled={loading}
-          className="flex-1 py-2 rounded-xl text-xs font-semibold haptic disabled:opacity-50"
-          style={{ background: '#F0EEFF', color: '#6C63FF', minWidth: '70px' }}
-        >
-          Проверить
-        </button>
-        <button
-          onClick={pullFromCloud}
-          disabled={loading || cloudTxCount === 0}
-          className="flex-1 py-2 rounded-xl text-xs font-semibold haptic disabled:opacity-50"
-          style={{ background: '#E8FFF5', color: '#00C896', minWidth: '70px' }}
-        >
-          ↓ Из облака
-        </button>
-        <button
-          onClick={pushToCloud}
-          disabled={loading}
-          className="flex-1 py-2 rounded-xl text-xs font-semibold haptic disabled:opacity-50"
-          style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)', color: 'white', minWidth: '70px' }}
-        >
-          ↑ В облако
-        </button>
-        <button
-          onClick={resetAndPush}
-          disabled={loading}
-          className="flex-1 py-2 rounded-xl text-xs font-semibold haptic disabled:opacity-50"
-          style={{ background: '#FFF5F5', color: '#FF4757', minWidth: '70px' }}
-        >
-          Сбросить
-        </button>
-      </div>
-    </div>
+  return createPortal(
+    <motion.div
+      ref={overlayRef}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-50 flex items-end"
+      style={{ background: 'rgba(26,26,46,0.65)', backdropFilter: 'blur(6px)', touchAction: 'none' }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <motion.div
+        initial={{ y: '100%' }}
+        animate={{ y: 0 }}
+        exit={{ y: '100%' }}
+        transition={{ type: 'spring', damping: 28, stiffness: 320 }}
+        className="w-full bg-white rounded-t-3xl overflow-hidden"
+        style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Handle */}
+        <div className="pt-4 pb-1 px-6">
+          <div className="w-10 h-1 bg-gray-200 rounded-full mx-auto" />
+        </div>
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 pt-3 pb-4">
+          <div>
+            <h2 className="text-lg font-bold text-gray-900">🔔 Уведомления</h2>
+            <p className="text-xs text-gray-400 mt-0.5">Настройте, какие уведомления получать</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="w-8 h-8 rounded-full flex items-center justify-center text-gray-400 haptic"
+            style={{ background: '#F3F4F6' }}
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Toggles */}
+        <div className="px-4 pb-2">
+          <div className="bg-white rounded-2xl overflow-hidden" style={{ boxShadow: 'var(--shadow-card)' }}>
+            {settings.map((s, i) => (
+              <div
+                key={s.key}
+                className={`flex items-center gap-3 px-4 py-3.5 ${i > 0 ? 'border-t border-gray-50' : ''}`}
+              >
+                <div
+                  className="w-9 h-9 rounded-xl flex items-center justify-center text-lg flex-shrink-0"
+                  style={{ background: '#F8F7FF' }}
+                >
+                  {s.icon}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-semibold text-gray-800 text-sm">{s.label}</div>
+                  <div className="text-xs text-gray-400 leading-tight mt-0.5">{s.desc}</div>
+                </div>
+                <button
+                  onClick={() => updateNotificationSettings({ [s.key]: !notificationSettings[s.key] })}
+                  className={`relative w-12 h-6 rounded-full transition-colors flex-shrink-0 haptic ${
+                    notificationSettings[s.key] ? 'bg-green-500' : 'bg-gray-200'
+                  }`}
+                  aria-label={`Toggle ${s.label}`}
+                >
+                  <motion.div
+                    animate={{ x: notificationSettings[s.key] ? 24 : 2 }}
+                    transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                    className="absolute top-1 w-4 h-4 bg-white rounded-full shadow-sm"
+                  />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Disable all */}
+        <div className="px-4 pt-2 pb-4">
+          <motion.button
+            whileTap={{ scale: 0.97 }}
+            onClick={() => {
+              const patch = Object.fromEntries(settings.map((s) => [s.key, false])) as Record<string, boolean>;
+              updateNotificationSettings(patch as any);
+            }}
+            disabled={!allEnabled}
+            className="w-full py-3 rounded-2xl font-semibold text-sm haptic disabled:opacity-40"
+            style={{ background: '#FFF5F5', color: '#FF4757' }}
+          >
+            Отключить все
+          </motion.button>
+        </div>
+      </motion.div>
+    </motion.div>,
+    document.body
   );
 }
 
 // ─── Profile Page ─────────────────────────────────────────────────────────────
 
-// ── Notification Settings Panel (TASK-020) ────────────────────────────────────
-
-function NotificationSettingsPanel() {
-  const { notificationSettings, updateNotificationSettings } = useFinanceStore();
-
-  const settings = [
-    { key: 'budgetAlerts' as const, label: 'Превышение бюджета', icon: '⚠️', desc: 'Когда расходы достигают 80% или 100% лимита' },
-    { key: 'recurringReminders' as const, label: 'Регулярные платежи', icon: '📅', desc: 'Напоминание за 3 дня до платежа' },
-    { key: 'weeklyReport' as const, label: 'Еженедельный отчёт', icon: '📊', desc: 'Итоги недели каждое воскресенье' },
-    { key: 'aiInsights' as const, label: 'AI-инсайты', icon: '🤖', desc: 'Персональные советы от FinWise AI' },
-  ];
-
-  return (
-    <div className="bg-white rounded-2xl overflow-hidden" style={{ boxShadow: 'var(--shadow-card)' }}>
-      <div className="px-4 pt-4 pb-2 border-b border-gray-50">
-        <div className="font-bold text-gray-900 text-sm">🔔 Уведомления</div>
-        <div className="text-xs text-gray-400 mt-0.5">Настройте, какие уведомления получать</div>
-      </div>
-      {settings.map((s, i) => (
-        <div
-          key={s.key}
-          className={`flex items-center gap-3 px-4 py-3.5 ${i > 0 ? 'border-t border-gray-50' : ''}`}
-        >
-          <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg flex-shrink-0" style={{ background: '#F8F7FF' }}>
-            {s.icon}
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="font-semibold text-gray-800 text-sm">{s.label}</div>
-            <div className="text-xs text-gray-400 leading-tight mt-0.5">{s.desc}</div>
-          </div>
-          <button
-            onClick={() => updateNotificationSettings({ [s.key]: !notificationSettings[s.key] })}
-            className={`relative w-12 h-6 rounded-full transition-colors flex-shrink-0 haptic ${
-              notificationSettings[s.key] ? 'bg-green-500' : 'bg-gray-200'
-            }`}
-            aria-label={`Toggle ${s.label}`}
-          >
-            <motion.div
-              animate={{ x: notificationSettings[s.key] ? 24 : 2 }}
-              transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-              className="absolute top-1 w-4 h-4 bg-white rounded-full shadow-sm"
-            />
-          </button>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ── Data Export Panel (TASK-021) ──────────────────────────────────────────────
-
-function DataExportPanel() {
-  const { transactions, goals, budgets } = useFinanceStore();
-  const [exporting, setExporting] = useState(false);
-  const [exported, setExported] = useState(false);
-
-  const exportAsCSV = () => {
-    setExporting(true);
-    try {
-      const headers = ['Дата', 'Тип', 'Сумма', 'Категория', 'Описание'];
-      const rows = transactions.map((t) => [
-        t.date,
-        t.type === 'expense' ? 'Расход' : 'Доход',
-        t.amount.toString(),
-        t.categoryId,
-        `"${(t.description ?? '').replace(/"/g, '""')}"`,
-      ]);
-      const csv = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
-      const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `finwise_export_${new Date().toISOString().slice(0, 10)}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
-      setExported(true);
-      setTimeout(() => setExported(false), 3000);
-    } finally {
-      setExporting(false);
-    }
-  };
-
-  const exportAsJSON = () => {
-    setExporting(true);
-    try {
-      const data = {
-        exportedAt: new Date().toISOString(),
-        transactions,
-        goals,
-        budgets,
-      };
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `finwise_export_${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-      setExported(true);
-      setTimeout(() => setExported(false), 3000);
-    } finally {
-      setExporting(false);
-    }
-  };
-
-  return (
-    <div className="bg-white rounded-2xl p-4" style={{ boxShadow: 'var(--shadow-card)' }}>
-      <div className="font-bold text-gray-900 text-sm mb-1">📤 Экспорт данных</div>
-      <div className="text-xs text-gray-400 mb-4">
-        {transactions.length} транзакций · {goals.length} целей · {budgets.length} бюджетов
-      </div>
-      <AnimatePresence>
-        {exported && (
-          <motion.div
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0 }}
-            className="mb-3 px-3 py-2 rounded-xl text-xs font-medium text-green-700"
-            style={{ background: '#E8FFF5' }}
-          >
-            ✅ Файл сохранён
-          </motion.div>
-        )}
-      </AnimatePresence>
-      <div className="flex gap-3">
-        <motion.button
-          whileTap={{ scale: 0.97 }}
-          onClick={exportAsCSV}
-          disabled={exporting || transactions.length === 0}
-          className="flex-1 py-3 rounded-2xl font-semibold text-sm haptic disabled:opacity-40"
-          style={{ background: '#E8FFF5', color: '#00C896' }}
-        >
-          📊 CSV
-        </motion.button>
-        <motion.button
-          whileTap={{ scale: 0.97 }}
-          onClick={exportAsJSON}
-          disabled={exporting || transactions.length === 0}
-          className="flex-1 py-3 rounded-2xl font-semibold text-sm haptic disabled:opacity-40"
-          style={{ background: '#F0EEFF', color: '#6C63FF' }}
-        >
-          📋 JSON
-        </motion.button>
-      </div>
-    </div>
-  );
-}
-
 export function ProfilePage() {
   const { user, logout } = useAuthStore();
   const financeStore = useFinanceStore();
-  const { streak, transactions, goals, getMonthSummary, clearAllData } = financeStore;
+  const { streak, transactions, clearAllData } = financeStore;
   const [showFileModal, setShowFileModal] = useState(false);
+  const [showNotifSheet, setShowNotifSheet] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
-  const summary = getMonthSummary();
+  // ── Achievements: unlocked + up to 2 closest to completion ──────────────────
   const unlockedAchievements = ACHIEVEMENTS.filter((a) => a.check(financeStore));
-  const totalSaved = goals.reduce((s, g) => s + g.currentAmount, 0);
+  const lockedAchievements = ACHIEVEMENTS.filter((a) => !a.check(financeStore));
+
+  const closestToUnlock = lockedAchievements
+    .map((ach) => {
+      const p = ach.getProgress(financeStore);
+      const ratio = p && p.target > 0 ? p.current / p.target : 0;
+      return { ach, p, ratio };
+    })
+    .filter((x) => x.ratio > 0)
+    .sort((a, b) => b.ratio - a.ratio)
+    .slice(0, 2);
+
+  const achievementsToShow = [
+    ...unlockedAchievements.map((ach) => ({ ach, unlocked: true, p: null })),
+    ...closestToUnlock.map(({ ach, p }) => ({ ach, unlocked: false, p })),
+  ];
+
+  const sectionLabel = 'text-xs font-semibold text-gray-400 uppercase tracking-wide px-1 mb-2';
 
   return (
     <div className="px-4 pt-5 pb-4 space-y-3" style={{ background: 'var(--bg-warm)' }}>
-      {/* User card */}
+
+      {/* ── User card ──────────────────────────────────────────────────────── */}
       <motion.div
         initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
@@ -958,7 +933,7 @@ export function ProfilePage() {
         />
         <div className="flex items-center gap-4 relative">
           <div
-            className="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl overflow-hidden"
+            className="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl overflow-hidden flex-shrink-0"
             style={{ background: 'rgba(255,255,255,0.15)' }}
           >
             {user?.photoUrl ? (
@@ -969,9 +944,11 @@ export function ProfilePage() {
           </div>
           <div>
             <div className="text-xl font-bold">
-              {user?.firstName ?? 'Пользователь'} {user?.lastName ?? ''}
+              {user?.firstName ?? 'Пользователь'}{user?.lastName ? ` ${user.lastName}` : ''}
             </div>
-            <div className="text-gray-400 text-sm">@{user?.username ?? 'finwise_user'}</div>
+            {user?.username ? (
+              <div className="text-gray-400 text-sm">@{user.username}</div>
+            ) : null}
             <div className="flex items-center gap-1.5 mt-1">
               <span className="text-sm">🔥</span>
               <span className="text-orange-300 text-xs font-semibold">{streak} дней подряд</span>
@@ -980,103 +957,97 @@ export function ProfilePage() {
         </div>
       </motion.div>
 
-      {/* Stats */}
-      <div className="grid grid-cols-3 gap-2">
-        {[
-          { label: 'Достижений', value: unlockedAchievements.length + '/' + ACHIEVEMENTS.length, icon: '🏆', color: '#FFB800', bg: '#FFFBEB' },
-          { label: 'Операций', value: String(transactions.length), icon: '📊', color: '#6C63FF', bg: '#F0EEFF' },
-          { label: 'Накоплено', value: formatCurrency(totalSaved), icon: '💰', color: '#00C896', bg: '#E8FFF5' },
-        ].map((stat) => (
-          <div key={stat.label} className="rounded-2xl p-3 text-center" style={{ background: stat.bg }}>
-            <div className="text-2xl mb-1">{stat.icon}</div>
-            <div className="text-base font-bold" style={{ color: stat.color }}>{stat.value}</div>
-            <div className="text-xs text-gray-400 mt-0.5">{stat.label}</div>
-          </div>
-        ))}
+      {/* ── Achievements ───────────────────────────────────────────────────── */}
+      <div>
+        <div className={sectionLabel}>
+          Достижения · {unlockedAchievements.length} из {ACHIEVEMENTS.length}
+        </div>
+        <div className="bg-white rounded-2xl overflow-hidden" style={{ boxShadow: 'var(--shadow-card)' }}>
+          {achievementsToShow.length === 0 ? (
+            <div className="px-4 py-8 text-center">
+              <div className="text-4xl mb-2">🎯</div>
+              <div className="text-sm font-semibold text-gray-700 mb-1">Начни свой путь</div>
+              <div className="text-xs text-gray-400">Добавь первую транзакцию, чтобы начать</div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-3 gap-3 p-4">
+              {achievementsToShow.map(({ ach, unlocked, p }) => (
+                <motion.div
+                  key={ach.id}
+                  initial={{ opacity: 0, scale: 0.85 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="rounded-2xl p-3 text-center"
+                  style={{
+                    background: unlocked ? '#F0EEFF' : '#F8F9FA',
+                    border: unlocked ? 'none' : '1px dashed #E5E7EB',
+                  }}
+                >
+                  <div className="text-3xl mb-1">{ach.icon}</div>
+                  <div className="text-xs font-semibold text-gray-700 leading-tight">{ach.name}</div>
+                  {unlocked ? (
+                    <div className="text-xs text-purple-500 mt-0.5 font-medium">✅</div>
+                  ) : (
+                    p && (
+                      <div className="mt-1.5">
+                        <div className="w-full bg-gray-200 rounded-full h-1 mb-1">
+                          <div
+                            className="bg-purple-400 h-1 rounded-full transition-all"
+                            style={{ width: `${Math.min((p.current / p.target) * 100, 100)}%` }}
+                          />
+                        </div>
+                        <div className="text-[10px] text-gray-400 leading-tight">{p.label}</div>
+                      </div>
+                    )
+                  )}
+                </motion.div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Finance summary */}
-      <div className="bg-white rounded-2xl p-4" style={{ boxShadow: 'var(--shadow-card)' }}>
-        <div className="text-sm font-bold text-gray-800 mb-3">💰 Финансовый итог</div>
-        <div className="space-y-2.5">
+      {/* ── Settings ───────────────────────────────────────────────────────── */}
+      <div>
+        <div className={sectionLabel}>Настройки</div>
+        <div className="bg-white rounded-2xl overflow-hidden" style={{ boxShadow: 'var(--shadow-card)' }}>
           {[
-            { label: 'Доходы за месяц', value: formatCurrency(summary.income), color: '#00C896' },
-            { label: 'Расходы за месяц', value: formatCurrency(summary.expenses), color: '#FF4757' },
-            { label: 'Накоплено в целях', value: formatCurrency(totalSaved), color: '#6C63FF' },
-            { label: 'Норма сбережений', value: summary.savingsRate + '%', color: summary.savingsRate >= 20 ? '#00C896' : '#FFB800' },
-          ].map((item) => (
-            <div key={item.label} className="flex justify-between items-center">
-              <span className="text-sm text-gray-500">{item.label}</span>
-              <span className="text-sm font-bold" style={{ color: item.color }}>{item.value}</span>
-            </div>
+            { icon: '📂', label: 'Импорт выписки из банка', action: () => setShowFileModal(true) },
+            { icon: '🔔', label: 'Уведомления', action: () => setShowNotifSheet(true) },
+            { icon: '🔒', label: 'Конфиденциальность', action: () => alert('Все данные хранятся локально на вашем устройстве') },
+            { icon: '❓', label: 'Помощь', action: () => alert('Напишите нам: @finwise_support') },
+          ].map((item, i) => (
+            <button
+              key={item.label}
+              onClick={item.action}
+              className={`w-full flex items-center gap-3 px-4 py-4 haptic active:bg-gray-50 ${i > 0 ? 'border-t border-gray-50' : ''}`}
+            >
+              <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg flex-shrink-0" style={{ background: '#F8F7FF' }}>
+                {item.icon}
+              </div>
+              <span className="flex-1 text-left font-semibold text-gray-800 text-sm">{item.label}</span>
+              <span className="text-gray-300 text-lg">›</span>
+            </button>
           ))}
         </div>
       </div>
 
-      {/* Achievements */}
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="font-bold text-gray-900 text-sm">🏆 Достижения</h2>
-          <span className="text-xs text-gray-400">{unlockedAchievements.length} из {ACHIEVEMENTS.length}</span>
-        </div>
-        <div className="grid grid-cols-3 gap-2">
-          {ACHIEVEMENTS.map((ach, i) => {
-            const unlocked = ach.check(financeStore);
-            return (
-              <motion.div
-                key={ach.id}
-                initial={{ opacity: 0, scale: 0.85 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ delay: i * 0.04 }}
-                className="bg-white rounded-2xl p-3 text-center"
-                style={{
-                  boxShadow: 'var(--shadow-card)',
-                  opacity: unlocked ? 1 : 0.4,
-                  filter: unlocked ? 'none' : 'grayscale(1)',
-                }}
-              >
-                <div className="text-3xl mb-1">{ach.icon}</div>
-                <div className="text-xs font-semibold text-gray-700 leading-tight">{ach.name}</div>
-                {!unlocked && <div className="text-xs text-gray-400 mt-0.5 leading-tight">{ach.desc}</div>}
-                {unlocked && <div className="text-xs text-green-500 mt-0.5 font-medium">✅</div>}
-              </motion.div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Notification Settings (TASK-020) */}
-      <NotificationSettingsPanel />
-
-      {/* Data Export (TASK-021) */}
-      <DataExportPanel />
-
-      {/* Settings */}
+      {/* ── Destructive zone ───────────────────────────────────────────────── */}
       <div className="bg-white rounded-2xl overflow-hidden" style={{ boxShadow: 'var(--shadow-card)' }}>
-        {[
-          { icon: '📂', label: 'Импорт выписки из банка', action: () => setShowFileModal(true) },
-          { icon: '🔒', label: 'Конфиденциальность', action: () => alert('Все данные хранятся локально на вашем устройстве') },
-          { icon: '❓', label: 'Помощь', action: () => alert('Напишите нам: @finwise_support') },
-          { icon: '🗑️', label: 'Удалить все транзакции', action: () => setShowClearConfirm(true) },
-        ].map((item, i) => (
-          <button
-            key={item.label}
-            onClick={item.action}
-            className={`w-full flex items-center gap-3 px-4 py-4 haptic active:bg-gray-50 ${i > 0 ? 'border-t border-gray-50' : ''}`}
-          >
-            <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg" style={{ background: '#F8F7FF' }}>
-              {item.icon}
-            </div>
-            <span className="flex-1 text-left font-semibold text-gray-800 text-sm">{item.label}</span>
-            <span className="text-gray-300 text-lg">›</span>
-          </button>
-        ))}
+        <button
+          onClick={() => setShowClearConfirm(true)}
+          className="w-full flex items-center gap-3 px-4 py-4 haptic active:bg-red-50"
+        >
+          <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg flex-shrink-0" style={{ background: '#FFF5F5' }}>
+            🗑️
+          </div>
+          <span className="flex-1 text-left font-semibold text-sm" style={{ color: '#FF4757' }}>
+            Удалить все транзакции
+          </span>
+          <span className="text-red-200 text-lg">›</span>
+        </button>
       </div>
 
-      {/* Cloud sync debug panel */}
-      <CloudSyncPanel localTxCount={transactions.length} />
-
-      {/* Logout */}
+      {/* ── Logout ─────────────────────────────────────────────────────────── */}
       <button
         onClick={logout}
         className="w-full py-4 rounded-2xl font-semibold haptic text-sm"
@@ -1085,11 +1056,15 @@ export function ProfilePage() {
         Выйти из аккаунта
       </button>
 
+      {/* ── Modals / Sheets ─────────────────────────────────────────────────── */}
       <AnimatePresence>
         {showFileModal && <FileImportModal onClose={() => setShowFileModal(false)} />}
       </AnimatePresence>
 
-      {/* Confirm delete all dialog — portal with AnimatePresence INSIDE */}
+      <AnimatePresence>
+        {showNotifSheet && <NotificationSheet onClose={() => setShowNotifSheet(false)} />}
+      </AnimatePresence>
+
       {createPortal(
         <AnimatePresence>
           {showClearConfirm && (
@@ -1123,10 +1098,7 @@ export function ProfilePage() {
                     Отмена
                   </button>
                   <button
-                    onClick={() => {
-                      clearAllData();
-                      setShowClearConfirm(false);
-                    }}
+                    onClick={() => { clearAllData(); setShowClearConfirm(false); }}
                     className="flex-1 py-3 rounded-2xl font-bold text-sm text-white haptic"
                     style={{ background: 'linear-gradient(135deg, #FF4757, #FF6B81)' }}
                   >
