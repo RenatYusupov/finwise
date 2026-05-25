@@ -5,7 +5,7 @@ const NAV_ITEMS = [
   { path: '/', label: 'Главная', icon: '🏠' },
   { path: '/analytics', label: 'Анализ', icon: '📊' },
   { path: '/ai', label: 'AI', icon: '🦉', isAi: true },
-  { path: '/recurring', label: 'Регулярные', icon: '🔁' },
+  { path: '/budget', label: 'Бюджет', icon: '💰' },
   { path: '/profile', label: 'Профиль', icon: '👤' },
 ];
 
