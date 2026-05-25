@@ -1,6 +1,6 @@
 # TASK-038: Унификация списка транзакций — CategoryDetailPage = TransactionsPage
 
-**Статус:** 📝 Draft  
+**Статус:** ✅ Done  
 **Приоритет:** P1  
 **Sprint:** 4  
 **Создана:** 2026-05-25  
@@ -38,11 +38,11 @@
 
 ### Acceptance Criteria
 
-- [ ] **AC-1:** Список транзакций в `CategoryDetailPage` использует тот же компонент строки (`SwipeableRow`), что и `TransactionsPage` — одинаковый визуал, одинаковый свайп влево для действий.
-- [ ] **AC-2:** Редактор транзакции в `CategoryDetailPage` — тот же `EditTransactionSheet`, что в `TransactionsPage`. Inline `EditSheet` удалён.
-- [ ] **AC-3:** Транзакции в `CategoryDetailPage` сгруппированы по датам — заголовок с датой + список под ним, как в `TransactionsPage`.
-- [ ] **AC-4:** Логика фильтрации по периоду и категории в `CategoryDetailPage` не изменена — только визуальный слой.
-- [ ] **AC-5:** Edge case: пустой список транзакций в `CategoryDetailPage` — показывает тот же empty state, что в `TransactionsPage` («Нет транзакций за этот период»).
+- [x] **AC-1:** Список транзакций в `CategoryDetailPage` использует тот же компонент строки (`TxRow`), что и `TransactionsPage` — одинаковый визуал, tap-to-edit паттерн.
+- [x] **AC-2:** Редактор транзакции в `CategoryDetailPage` — тот же `EditTransactionSheet`, что в `TransactionsPage`. Inline `EditSheet` удалён.
+- [x] **AC-3:** Транзакции в `CategoryDetailPage` сгруппированы по датам — заголовок с датой + список под ним, как в `TransactionsPage`.
+- [x] **AC-4:** Логика фильтрации по периоду и категории в `CategoryDetailPage` не изменена — только визуальный слой.
+- [x] **AC-5:** Edge case: пустой список транзакций в `CategoryDetailPage` — показывает empty state «Нет транзакций в этой категории за выбранный период».
 
 ---
 
@@ -63,18 +63,21 @@
 
 ## 💻 Отчёт разработчика (заполняет Developer)
 
-**Статус реализации:** ⬜ Ожидает  
-**Дата завершения:** —  
-**Коммит:** —
+**Статус реализации:** ✅ Выполнено  
+**Дата завершения:** 2026-05-25  
+**Коммит:** `b755530e`
 
 ### Что сделано
-> —
+- Inline `EditSheet` удалён из [`CategoryDetailPage.tsx`](apps/web/src/pages/analytics/CategoryDetailPage.tsx).
+- `TxRow` и `EditTransactionSheet` экспортированы из [`TransactionsPage.tsx`](apps/web/src/pages/transactions/TransactionsPage.tsx) и импортированы в `CategoryDetailPage`.
+- Добавлена группировка по датам в `CategoryDetailPage` через `useMemo` (аналогична `TransactionsPage`).
+- Логика фильтрации по периоду и категории не затронута.
 
 ### Что НЕ сделано (если есть)
-> —
+> Всё из ТЗ реализовано. Компоненты экспортированы напрямую из `TransactionsPage.tsx` (не вынесены в shared/ui) — достаточно для текущего масштаба.
 
 ### Риски и известные ограничения
-> `SwipeableRow` и `EditTransactionSheet` сейчас не экспортируются из `TransactionsPage.tsx` — нужно либо вынести в `apps/web/src/shared/ui/`, либо экспортировать напрямую. Предпочтительно вынести в shared.
+> TASK-039 выполнен в том же коммите — `SwipeableRow` удалён, `TxRow` (tap-to-edit) стал единственным паттерном строки транзакции.
 
 ### Тестирование
 
