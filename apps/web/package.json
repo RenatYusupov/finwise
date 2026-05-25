@@ -12,19 +12,20 @@
   },
   "dependencies": {
     "@finwise/shared-types": "workspace:*",
+    "@tanstack/react-query": "^5.40.0",
     "@telegram-apps/sdk-react": "^2.0.0",
     "@telegram-apps/telegram-ui": "^2.0.0",
-    "@tanstack/react-query": "^5.40.0",
     "axios": "^1.7.0",
+    "clsx": "^2.1.0",
+    "date-fns": "^3.6.0",
     "framer-motion": "^11.2.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
+    "react-hook-form": "^7.51.0",
+    "react-hot-toast": "^2.6.0",
     "react-router-dom": "^6.23.0",
     "recharts": "^2.12.0",
-    "zustand": "^4.5.0",
-    "react-hook-form": "^7.51.0",
-    "date-fns": "^3.6.0",
-    "clsx": "^2.1.0"
+    "zustand": "^4.5.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.0",

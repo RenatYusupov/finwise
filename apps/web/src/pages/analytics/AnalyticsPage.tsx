@@ -4,8 +4,7 @@ import { motion } from 'framer-motion';
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, LineChart, Line } from 'recharts';
 import { useFinanceStore, EXPENSE_CATEGORIES, type Transaction } from '@/features/finance/store';
 import { formatCurrency } from '@/shared/utils/format';
-import { RecategorizationSheet } from './profile/RecategorizationSheet';
-import type { Transaction } from '@/features/finance/store';
+import { RecategorizationSheet } from '../profile/RecategorizationSheet';
 
 const MONTHS = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
 type PeriodKey = 'month' | 'prev_month' | '3m' | '6m';
