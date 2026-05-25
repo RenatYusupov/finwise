@@ -422,44 +422,6 @@ function SafeToSpendCard({
   );
 }
 
-function AiInsightBanner({ expenses, income, navigate }: { expenses: number; income: number; navigate: (p: string) => void }) {
-  const savingsRate = income > 0 ? Math.round(((income - expenses) / income) * 100) : 0;
-
-  let insight = '🤖 Спроси меня о своих финансах — я помогу сэкономить!';
-  if (income > 0 && expenses > 0) {
-    if (savingsRate < 10) {
-      insight = `⚠️ Ты откладываешь только ${savingsRate}% дохода. Давай найдём, где сэкономить?`;
-    } else if (savingsRate >= 30) {
-      insight = `🎉 Отлично! Ты откладываешь ${savingsRate}% дохода. Хочешь инвестировать?`;
-    } else {
-      insight = `💡 Ты откладываешь ${savingsRate}% дохода. Можно увеличить до 20%!`;
-    }
-  }
-
-  return (
-    <motion.button
-      initial={{ opacity: 0, y: 16 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: 0.2 }}
-      onClick={() => navigate('/ai')}
-      className="w-full text-left rounded-2xl p-4 haptic"
-      style={{ background: 'linear-gradient(135deg, #F0EEFF 0%, #EDE8FF 100%)', border: '1px solid rgba(108,99,255,0.15)' }}
-    >
-      <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-full flex items-center justify-center text-xl flex-shrink-0"
-          style={{ background: 'linear-gradient(135deg, #6C63FF, #9B59B6)' }}>
-          🦉
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="text-xs font-semibold text-purple-600 mb-0.5">FinWise AI</div>
-          <div className="text-sm text-gray-700 leading-snug">{insight}</div>
-        </div>
-        <div className="text-purple-400 text-lg flex-shrink-0">›</div>
-      </div>
-    </motion.button>
-  );
-}
-
 function UpcomingPaymentsWidget({ navigate }: { navigate: (p: string) => void }) {
   // Only show payments that the user has explicitly confirmed (not auto-detected noise)
   // and only within the next 3 days (urgent window)
@@ -518,7 +480,7 @@ export function DashboardPage() {
   const navigate = useNavigate();
 
   const summary = getMonthSummary();
-  const recentTxs = getRecentTransactions(4);
+  const recentTxs = getRecentTransactions(5);
   const activeGoals = goals.filter((g) => g.currentAmount < g.targetAmount).slice(0, 2);
 
   const now = new Date();
@@ -588,8 +550,10 @@ export function DashboardPage() {
               <div className="font-bold text-red-400 text-sm">{formatCurrency(summary.expenses)}</div>
             </div>
             <div className="flex-1 bg-white/10 rounded-xl p-2.5">
-              <div className="text-gray-400 text-xs mb-0.5">💾 Сбережения</div>
-              <div className="font-bold text-purple-300 text-sm">{summary.savingsRate}%</div>
+              <div className="text-gray-400 text-xs mb-0.5">💾 Сбережено</div>
+              <div className={`font-bold text-sm ${summary.savings >= 0 ? 'text-purple-300' : 'text-red-400'}`}>
+                {summary.savings >= 0 ? '+' : ''}{formatCurrency(summary.savings)}
+              </div>
             </div>
           </div>
         </div>
@@ -611,9 +575,9 @@ export function DashboardPage() {
       {/* Quick actions */}
       <div className="grid grid-cols-4 gap-2">
         {[
-          { icon: '➕', label: 'Трата', to: '/transactions/add', bg: '#FFF0EB', color: '#FF6B35' },
-          { icon: '🎯', label: 'Цели', to: '/goals', bg: '#F0EEFF', color: '#6C63FF' },
-          { icon: '📊', label: 'Анализ', to: '/analytics', bg: '#E8FFF5', color: '#00C896' },
+          { icon: '↓', label: 'Расход', to: '/transactions/add', bg: '#FFF0EB', color: '#FF6B35' },
+          { icon: '↑', label: 'Доход', to: '/transactions/add?type=income', bg: '#E8FFF5', color: '#00C896' },
+          { icon: '📊', label: 'Анализ', to: '/analytics', bg: '#F0EEFF', color: '#6C63FF' },
           { icon: '🤖', label: 'AI', to: '/ai', bg: '#F5F0FF', color: '#9B59B6' },
         ].map((action, i) => (
           <motion.div
@@ -654,7 +618,7 @@ export function DashboardPage() {
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.3 + i * 0.07 }}
                 >
-                  <Link to="/goals" className="block bg-white rounded-2xl p-4 haptic" style={{ boxShadow: 'var(--shadow-card)' }}>
+                  <Link to={`/goals/${goal.id}`} className="block bg-white rounded-2xl p-4 haptic" style={{ boxShadow: 'var(--shadow-card)' }}>
                     <div className="flex items-center gap-3 mb-2.5">
                       <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg"
                         style={{ backgroundColor: goal.color + '20' }}>

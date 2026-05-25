@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useFinanceStore, EXPENSE_CATEGORIES, INCOME_CATEGORIES, type TransactionType } from '@/features/finance/store';
 import { CreateCategorySheet } from '@/features/finance/CreateCategorySheet';
@@ -9,8 +9,10 @@ type ParsedTx = GroqParsedTx;
 
 export function AddTransactionPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { addTransaction, customCategories, deleteCustomCategory, transactions } = useFinanceStore();
-  const [type, setType] = useState<TransactionType>('expense');
+  const initialType: TransactionType = searchParams.get('type') === 'income' ? 'income' : 'expense';
+  const [type, setType] = useState<TransactionType>(initialType);
   const [selectedCategory, setSelectedCategory] = useState<string>('');
   const [amount, setAmount] = useState('');
   const [description, setDescription] = useState('');

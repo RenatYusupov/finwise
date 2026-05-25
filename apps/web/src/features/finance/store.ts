@@ -906,7 +906,10 @@ export const useFinanceStore = create<FinanceState>()(
         return { income, expenses, savings, savingsRate };
       },
 
-      getRecentTransactions: (limit = 10) => get().transactions.slice(0, limit),
+      getRecentTransactions: (limit = 10) =>
+        [...get().transactions]
+          .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+          .slice(0, limit),
 
       getCategorySpending: () => {
         const now = new Date();
