@@ -2,17 +2,19 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useFinanceStore, EXPENSE_CATEGORIES, INCOME_CATEGORIES, type TransactionType } from '@/features/finance/store';
+import { CreateCategorySheet } from '@/features/finance/CreateCategorySheet';
 import { parseTransactionsWithGroq, type GroqParsedTx } from '@/features/ai/groqParser';
 
 type ParsedTx = GroqParsedTx;
 
 export function AddTransactionPage() {
   const navigate = useNavigate();
-  const { addTransaction } = useFinanceStore();
+  const { addTransaction, customCategories, deleteCustomCategory, transactions } = useFinanceStore();
   const [type, setType] = useState<TransactionType>('expense');
   const [selectedCategory, setSelectedCategory] = useState<string>('');
   const [amount, setAmount] = useState('');
   const [description, setDescription] = useState('');
+  const [showCreateCat, setShowCreateCat] = useState(false);
 
   // Dictation mode state
   const [dictateMode, setDictateMode] = useState(false);
@@ -21,7 +23,9 @@ export function AddTransactionPage() {
   const [isParsing, setIsParsing] = useState(false);
   const [parseError, setParseError] = useState('');
 
-  const categories = type === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
+  const systemCategories = type === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
+  const customOfType = customCategories.filter((c) => c.type === type);
+  const categories = [...systemCategories, ...customOfType];
   const isExpense = type === 'expense';
   const accentColor = isExpense ? '#FF6B35' : '#00C896';
   const accentBg = isExpense ? '#FFF0EB' : '#E8FFF5';
@@ -86,13 +90,32 @@ export function AddTransactionPage() {
   };
 
   const getCategoryName = (catId: string): string => {
-    const all = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES];
+    const all = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES, ...customCategories];
     return all.find((c) => c.id === catId)?.name ?? catId;
   };
 
   const getCategoryIcon = (catId: string): string => {
-    const all = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES];
+    const all = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES, ...customCategories];
     return all.find((c) => c.id === catId)?.icon ?? '💰';
+  };
+
+  const handleDeleteCustomCat = (catId: string, catName: string) => {
+    const txCount = transactions.filter((t) => t.categoryId === catId).length;
+    const msg = txCount > 0
+      ? `Есть ${txCount} ${txCount === 1 ? 'транзакция' : txCount < 5 ? 'транзакции' : 'транзакций'} с этой категорией. Удалить категорию?`
+      : `Удалить категорию «${catName}»?`;
+    const tg = window.Telegram?.WebApp;
+    if (tg?.showConfirm) {
+      tg.showConfirm(msg, (confirmed) => {
+        if (confirmed) {
+          deleteCustomCategory(catId);
+          if (selectedCategory === catId) setSelectedCategory('');
+        }
+      });
+    } else if (window.confirm(msg)) {
+      deleteCustomCategory(catId);
+      if (selectedCategory === catId) setSelectedCategory('');
+    }
   };
 
   // ── Dictate mode ──────────────────────────────────────────────────────────
@@ -356,27 +379,57 @@ export function AddTransactionPage() {
           <div className="grid grid-cols-4 gap-2">
             {categories.map((cat) => {
               const isSelected = selectedCategory === cat.id;
+              const isCustom = cat.id.startsWith('custom_');
               return (
-                <motion.button
-                  key={cat.id}
-                  whileTap={{ scale: 0.93 }}
-                  onClick={() => setSelectedCategory(cat.id)}
-                  className="flex flex-col items-center gap-1 p-2.5 rounded-2xl haptic transition-all"
-                  style={isSelected
-                    ? { background: accentBg, outline: `2px solid ${accentColor}` }
-                    : { background: '#F9FAFB' }
-                  }
-                >
-                  <span className="text-2xl">{cat.icon}</span>
-                  <span className="text-xs font-medium truncate w-full text-center leading-tight"
-                    style={{ color: isSelected ? accentColor : '#6B7280' }}>
-                    {cat.name}
-                  </span>
-                </motion.button>
+                <div key={cat.id} className="relative">
+                  <motion.button
+                    whileTap={{ scale: 0.93 }}
+                    onClick={() => setSelectedCategory(cat.id)}
+                    className="w-full flex flex-col items-center gap-1 p-2.5 rounded-2xl haptic transition-all"
+                    style={isSelected
+                      ? { background: accentBg, outline: `2px solid ${accentColor}` }
+                      : { background: '#F9FAFB' }
+                    }
+                  >
+                    <span className="text-2xl">{cat.icon}</span>
+                    <span className="text-xs font-medium truncate w-full text-center leading-tight"
+                      style={{ color: isSelected ? accentColor : '#6B7280' }}>
+                      {cat.name}
+                    </span>
+                  </motion.button>
+                  {/* Delete button for custom categories */}
+                  {isCustom && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDeleteCustomCat(cat.id, cat.name); }}
+                      className="absolute -top-1 -right-1 w-4 h-4 rounded-full flex items-center justify-center text-white haptic"
+                      style={{ background: '#EF4444', fontSize: '9px', lineHeight: 1, zIndex: 1 }}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
               );
             })}
           </div>
+          {/* Create custom category button */}
+          <button
+            onClick={() => setShowCreateCat(true)}
+            className="mt-3 w-full py-2 rounded-2xl text-xs font-semibold haptic flex items-center justify-center gap-1.5"
+            style={{ background: 'rgba(108,99,255,0.06)', color: '#6C63FF' }}
+          >
+            <span>+</span>
+            <span>Создать категорию</span>
+          </button>
         </div>
+
+        {/* CreateCategorySheet portal */}
+        {showCreateCat && (
+          <CreateCategorySheet
+            type={type}
+            onClose={() => setShowCreateCat(false)}
+            onCreated={(catId) => { setSelectedCategory(catId); setShowCreateCat(false); }}
+          />
+        )}
 
         {/* Description */}
         <div className="mx-4 mt-3 bg-white rounded-2xl px-4 py-3 flex items-center gap-2"

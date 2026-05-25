@@ -116,8 +116,14 @@ export const INCOME_CATEGORIES: Category[] = [
 
 export const ALL_CATEGORIES = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES];
 
+/** Module-level cache for custom categories — kept in sync with store state.
+ *  Used by getCategoryById so store actions (addTransaction, etc.) can resolve
+ *  custom category objects without importing the store (avoids circular ref).
+ */
+let _customCategoryCache: Category[] = [];
+
 function getCategoryById(id: string): Category | undefined {
-  return ALL_CATEGORIES.find((c) => c.id === id);
+  return [...ALL_CATEGORIES, ..._customCategoryCache].find((c) => c.id === id);
 }
 
 // ─── Telegram CloudStorage sync ───────────────────────────────────────────────
@@ -588,6 +594,8 @@ export interface FinanceState {
   lastActiveDate: string;
   // TASK-020: notification settings
   notificationSettings: NotificationSettings;
+  // TASK-042: custom categories
+  customCategories: Category[];
 
   addTransaction: (tx: Omit<Transaction, 'id' | 'category'>) => void;
   /** Batch import with deduplication. Returns { imported, skipped } counts. */
@@ -604,6 +612,11 @@ export interface FinanceState {
   updateStreak: () => void;
   // TASK-020
   updateNotificationSettings: (settings: Partial<NotificationSettings>) => void;
+
+  // TASK-042: custom category CRUD
+  /** Creates a new custom category. Returns the new category id, or '' if at 20-category limit. */
+  addCustomCategory: (cat: Omit<Category, 'id'>) => string;
+  deleteCustomCategory: (id: string) => void;
 
   // Recurring payments CRUD
   addRecurringPayment: (p: Omit<RecurringPayment, 'id' | 'createdAt'>) => void;
@@ -627,6 +640,7 @@ export const useFinanceStore = create<FinanceState>()(
       budgets: [],
       aiMessages: [],
       recurringPayments: [],
+      customCategories: [],
       streak: 1,
       lastActiveDate: new Date().toISOString().split('T')[0] ?? '',
       notificationSettings: {
@@ -782,9 +796,29 @@ export const useFinanceStore = create<FinanceState>()(
       clearAiChat: () => set({ aiMessages: [] }),
 
       clearAllData: () => {
-        set({ transactions: [], goals: [], budgets: [], aiMessages: [], recurringPayments: [], streak: 1, lastActiveDate: '' });
+        _customCategoryCache = [];
+        set({ transactions: [], goals: [], budgets: [], aiMessages: [], recurringPayments: [], customCategories: [], streak: 1, lastActiveDate: '' });
         // Also wipe cloud storage so other devices don't re-sync old data
         clearCloudStorage().catch(() => {/* ignore */});
+      },
+
+      // ── Custom categories CRUD (TASK-042) ────────────────────────────────────
+
+      addCustomCategory: (catData) => {
+        const MAX_CUSTOM = 20;
+        if (get().customCategories.length >= MAX_CUSTOM) return '';
+        const id = `custom_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        const newCat: Category = { ...catData, id };
+        _customCategoryCache = [..._customCategoryCache, newCat];
+        set((s) => ({ customCategories: [...s.customCategories, newCat] }));
+        scheduleCloudUpload();
+        return id;
+      },
+
+      deleteCustomCategory: (id) => {
+        _customCategoryCache = _customCategoryCache.filter((c) => c.id !== id);
+        set((s) => ({ customCategories: s.customCategories.filter((c) => c.id !== id) }));
+        scheduleCloudUpload();
       },
 
       // ── Recurring payments CRUD ──────────────────────────────────────────────
@@ -901,6 +935,13 @@ export const useFinanceStore = create<FinanceState>()(
     {
       name: 'finwise-finance',
       storage: hybridStorage,
+      onRehydrateStorage: () => (state) => {
+        // Sync _customCategoryCache from persisted state so getCategoryById
+        // resolves custom categories immediately after cold-start localStorage read.
+        if (state?.customCategories?.length) {
+          _customCategoryCache = state.customCategories;
+        }
+      },
     }
   )
 );

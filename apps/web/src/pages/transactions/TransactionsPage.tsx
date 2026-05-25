@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { createPortal } from 'react-dom';
 import { useFinanceStore, EXPENSE_CATEGORIES, INCOME_CATEGORIES, type Transaction } from '@/features/finance/store';
+import { CreateCategorySheet } from '@/features/finance/CreateCategorySheet';
 import { formatCurrency } from '@/shared/utils/format';
 
 type TxPeriod = 'all' | 'week' | 'month' | 'prev_month' | 'custom';
@@ -75,7 +76,7 @@ export function EditTransactionSheet({
   onClose: () => void;
   onDelete?: () => void;
 }) {
-  const { updateTransaction } = useFinanceStore();
+  const { updateTransaction, customCategories, deleteCustomCategory, transactions: allTxs } = useFinanceStore();
 
   const [type, setType] = useState<'expense' | 'income'>(tx.type === 'transfer' ? 'expense' : tx.type);
   const [amount, setAmount] = useState(String(tx.amount));
@@ -83,11 +84,33 @@ export function EditTransactionSheet({
   const [categoryId, setCategoryId] = useState(tx.categoryId || '');
   const [date, setDate] = useState(tx.date.slice(0, 10));
   const [showCatPicker, setShowCatPicker] = useState(false);
+  const [showCreateCat, setShowCreateCat] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const cats = type === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+  const systemCats = type === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+  const customCatsOfType = customCategories.filter((c) => c.type === type);
+  const cats = [...systemCats, ...customCatsOfType];
   const selectedCat = cats.find((c) => c.id === categoryId);
+
+  const handleDeleteCustomCat = (catId: string, catName: string) => {
+    const txCount = allTxs.filter((t) => t.categoryId === catId).length;
+    const msg = txCount > 0
+      ? `Есть ${txCount} ${txCount === 1 ? 'транзакция' : txCount < 5 ? 'транзакции' : 'транзакций'} с этой категорией. Удалить категорию?`
+      : `Удалить категорию «${catName}»?`;
+    const tg = window.Telegram?.WebApp;
+    if (tg?.showConfirm) {
+      tg.showConfirm(msg, (confirmed) => {
+        if (confirmed) {
+          deleteCustomCategory(catId);
+          if (categoryId === catId) setCategoryId(systemCats[0]?.id ?? '');
+        }
+      });
+    } else if (window.confirm(msg)) {
+      deleteCustomCategory(catId);
+      if (categoryId === catId) setCategoryId(systemCats[0]?.id ?? '');
+    }
+  };
 
   // Telegram BackButton: close sheet on back press
   useEffect(() => {
@@ -124,11 +147,13 @@ export function EditTransactionSheet({
 
   // When type changes, reset category if it doesn't belong to new type
   useEffect(() => {
-    const newCats = type === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
-    if (!newCats.find((c) => c.id === categoryId)) {
-      setCategoryId(newCats[0]?.id ?? '');
+    const newSystemCats = type === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+    const newCustomCats = customCategories.filter((c) => c.type === type);
+    const allNewCats = [...newSystemCats, ...newCustomCats];
+    if (!allNewCats.find((c) => c.id === categoryId)) {
+      setCategoryId(newSystemCats[0]?.id ?? '');
     }
-  }, [type, categoryId]);
+  }, [type, categoryId, customCategories]);
 
   const handleSave = () => {
     const parsedAmount = parseFloat(amount.replace(',', '.'));
@@ -160,7 +185,9 @@ export function EditTransactionSheet({
 
   const isValid = parseFloat(amount.replace(',', '.')) > 0 && date;
 
-  return createPortal(
+  return (
+    <>
+    {createPortal(
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
@@ -326,28 +353,59 @@ export function EditTransactionSheet({
               <div className="w-10 h-1 bg-gray-200 rounded-full mx-auto mb-4" />
               <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Выберите категорию</div>
               <div className="grid grid-cols-4 gap-2 pb-2">
-                {cats.map((cat) => (
-                  <motion.button
-                    key={cat.id}
-                    whileTap={{ scale: 0.92 }}
-                    onClick={() => { setCategoryId(cat.id); setShowCatPicker(false); }}
-                    className="flex flex-col items-center gap-1 py-3 rounded-2xl haptic"
-                    style={{
-                      background: categoryId === cat.id ? '#6C63FF' : '#F3F4F6',
-                      color: categoryId === cat.id ? '#fff' : '#374151',
-                    }}
-                  >
-                    <span className="text-xl leading-none">{cat.icon}</span>
-                    <span className="text-xs font-medium leading-tight text-center px-1">{cat.name}</span>
-                  </motion.button>
-                ))}
+                {cats.map((cat) => {
+                  const isCustom = cat.id.startsWith('custom_');
+                  return (
+                    <div key={cat.id} className="relative">
+                      <motion.button
+                        whileTap={{ scale: 0.92 }}
+                        onClick={() => { setCategoryId(cat.id); setShowCatPicker(false); }}
+                        className="w-full flex flex-col items-center gap-1 py-3 rounded-2xl haptic"
+                        style={{
+                          background: categoryId === cat.id ? '#6C63FF' : '#F3F4F6',
+                          color: categoryId === cat.id ? '#fff' : '#374151',
+                        }}
+                      >
+                        <span className="text-xl leading-none">{cat.icon}</span>
+                        <span className="text-xs font-medium leading-tight text-center px-1">{cat.name}</span>
+                      </motion.button>
+                      {isCustom && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleDeleteCustomCat(cat.id, cat.name); }}
+                          className="absolute -top-1 -right-1 w-4 h-4 rounded-full flex items-center justify-center text-white haptic"
+                          style={{ background: '#EF4444', fontSize: '9px', lineHeight: 1, zIndex: 1 }}
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
+              {/* Create custom category button */}
+              <button
+                onClick={() => { setShowCatPicker(false); setShowCreateCat(true); }}
+                className="mt-1 mb-2 w-full py-2 rounded-2xl text-xs font-semibold haptic flex items-center justify-center gap-1.5"
+                style={{ background: 'rgba(108,99,255,0.06)', color: '#6C63FF' }}
+              >
+                <span>+</span>
+                <span>Создать категорию</span>
+              </button>
             </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
     </motion.div>,
     document.body
+    )}
+    {showCreateCat && (
+      <CreateCategorySheet
+        type={type}
+        onClose={() => setShowCreateCat(false)}
+        onCreated={(catId) => { setCategoryId(catId); setShowCreateCat(false); }}
+      />
+    )}
+    </>
   );
 }
 
