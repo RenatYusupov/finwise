@@ -435,26 +435,67 @@ export function detectRecurringPayments(
   transactions: Transaction[],
   existing: RecurringPayment[],
 ): RecurringPayment[] {
-  // Thresholds — raised to reduce false positives
-  const MIN_AMOUNT = 500;        // raised from 100 to 500 ₽ (subscriptions handled via whitelist)
-  const MIN_MONTHS = 3;          // raised from 2 to 3 months
-  const MIN_CLUSTER_SIZE = 3;    // minimum transactions in cluster
-  const AMOUNT_TOLERANCE = 0.15; // ±15%
-  const DAY_TOLERANCE = 7;       // ±7 days
+  // ── Thresholds ────────────────────────────────────────────────────────────
+  const MIN_AMOUNT = 500;        // ₽; subscriptions < 500 handled via whitelist
+  const MIN_MONTHS = 3;          // distinct calendar months required
+  const MIN_CLUSTER_SIZE = 3;    // minimum transactions in a qualifying cluster
+  const AMOUNT_TOLERANCE = 0.15; // ±15% amount variance within a cluster
+  const DAY_TOLERANCE = 7;       // ±7 days from cluster median day
+  const MAX_MONTH_GAP = 2;       // max gap between consecutive months (gap=3 → quarterly → reject)
 
-  // Categories that are inherently non-recurring (variable spend)
+  // ── Category filters ──────────────────────────────────────────────────────
+  // Variable-spend categories: never recurring by nature
   const EXCLUDE_CATEGORIES = new Set([
-    'cafe', 'food', 'shopping', 'entertainment',
+    'cafe', 'food', 'shopping', 'entertainment', 'other_exp',
   ]);
 
-  // Subscription keyword whitelist — allow amounts 100–499 ₽ if description matches
+  // Categories where same-category = strong signal of recurring payment.
+  // transport excluded: taxi rides have same description & similar amounts
+  // but are NOT recurring subscriptions — detected via Path 1 if truly recurring.
+  const RECURRING_CATEGORIES = new Set([
+    'home', 'health', 'education', 'telecom',
+  ]);
+
+  // Subscription keyword whitelist — allow amounts 100–499 ₽ for known services
   const SUBSCRIPTION_KEYWORDS =
     /яндекс.?плюс|яндекс.?музык|netflix|spotify|apple|google.?play|vk.?музык|okko|кинопоиск|ivi|more\.tv|premier|lit\.res|liters|wink|megafon\.tv|beeline\.tv|mts\.tv/i;
 
+  // ── Description similarity (ALG-001 Изменение 2) ──────────────────────────
+  // Jaccard similarity on normalized word sets (words > 2 chars).
+  function descriptionSimilarity(a: string, b: string): number {
+    const normalize = (s: string) =>
+      s.toLowerCase().replace(/[\d\W]+/g, ' ').trim();
+    const na = normalize(a);
+    const nb = normalize(b);
+    if (!na || !nb) return 0;
+    const wordsA = new Set(na.split(' ').filter((w) => w.length > 2));
+    const wordsB = new Set(nb.split(' ').filter((w) => w.length > 2));
+    if (wordsA.size === 0 || wordsB.size === 0) return 0;
+    const intersection = [...wordsA].filter((w) => wordsB.has(w)).length;
+    const union = new Set([...wordsA, ...wordsB]).size;
+    return union > 0 ? intersection / union : 0;
+  }
+
+  // ── Consecutive months check ───────────────────────────────────────────────
+  // Reject clusters where any adjacent pair of months is > MAX_MONTH_GAP apart.
+  // Eliminates "quarterly" false positives (jan, apr, jul → gap=3 → reject).
+  function hasConsecutiveMonths(months: Set<string>): boolean {
+    const sorted = [...months].sort();
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = new Date((sorted[i - 1] ?? '') + '-01');
+      const curr = new Date((sorted[i] ?? '') + '-01');
+      const gap =
+        (curr.getFullYear() - prev.getFullYear()) * 12 +
+        (curr.getMonth() - prev.getMonth());
+      if (gap > MAX_MONTH_GAP) return false;
+    }
+    return true;
+  }
+
+  // ── Candidate filter ──────────────────────────────────────────────────────
   const now = new Date();
   const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 6, 1).toISOString();
 
-  // Only expenses and transfers (not income, not salary, not variable-spend categories)
   const candidates = transactions.filter(
     (t) =>
       (t.type === 'expense' || t.type === 'transfer') &&
@@ -462,77 +503,104 @@ export function detectRecurringPayments(
       !EXCLUDE_CATEGORIES.has(t.categoryId) &&
       t.date >= sixMonthsAgo &&
       (t.amount >= MIN_AMOUNT ||
-        // Allow small subscription amounts if description matches known services
-        (t.amount >= 100 && SUBSCRIPTION_KEYWORDS.test(t.description || ''))),
+        (t.amount >= 100 && SUBSCRIPTION_KEYWORDS.test(t.description ?? ''))),
   );
 
   if (candidates.length === 0) return [];
 
-  // Group transactions into clusters: same amount bucket + same day bucket
-  // We use a greedy approach: sort by amount, then try to merge nearby transactions
-  const sorted = [...candidates].sort((a, b) => a.amount - b.amount);
+  // ── Clustering ────────────────────────────────────────────────────────────
+  // Two paths into a cluster (both require amount ±15% and day ±7):
+  //   Path 1 — same service/subscription: descriptionSimilarity ≥ 0.5
+  //   Path 2 — recurring category:        same categoryId ∈ RECURRING_CATEGORIES
+  //
+  // seedLabel: description of the first tx — used for similarity matching
+  // before buildLabel() can be called on the full cluster.
 
-  // Build clusters
   interface Cluster {
     txs: Transaction[];
     months: Set<string>; // 'YYYY-MM'
+    seedLabel: string;   // first tx description, for Path 1 matching
+    categoryId: string;  // first tx category, for Path 2 matching
   }
   const clusters: Cluster[] = [];
 
+  const sorted = [...candidates].sort((a, b) => a.amount - b.amount);
+
   for (const tx of sorted) {
     const txDay = new Date(tx.date).getDate();
-    const txMonth = tx.date.slice(0, 7); // 'YYYY-MM'
+    const txMonth = tx.date.slice(0, 7);
+    const txDesc = tx.description ?? '';
 
-    // Try to find an existing cluster this tx fits into
     let matched = false;
     for (const cluster of clusters) {
+      // ── Amount check (both paths) ────────────────────────────────────────
       const clusterMedian = medianOf(cluster.txs.map((t) => t.amount));
       const amountDiff = Math.abs(tx.amount - clusterMedian) / clusterMedian;
       if (amountDiff > AMOUNT_TOLERANCE) continue;
 
-      // Check day proximity: compare against median day of cluster
+      // ── Day check (both paths) ───────────────────────────────────────────
       const clusterDays = cluster.txs.map((t) => new Date(t.date).getDate());
       const clusterMedianDay = Math.round(medianOf(clusterDays));
       const dayDiff = Math.abs(txDay - clusterMedianDay);
-      // Handle month-boundary wrap (e.g., day 28 vs day 2 of next month)
+      // Wrap handles month-boundary billing (e.g., day 28 ↔ day 2 next month)
       const dayDiffWrapped = Math.min(dayDiff, 31 - dayDiff);
       if (dayDiffWrapped > DAY_TOLERANCE) continue;
 
-      // Don't add a second tx from the same month to the same cluster
-      // (prevents double-counting two similar payments in one month)
+      // ── One tx per month per cluster ─────────────────────────────────────
       if (cluster.months.has(txMonth)) continue;
 
-      cluster.txs.push(tx);
-      cluster.months.add(txMonth);
-      matched = true;
-      break;
+      // ── Path 1: description similarity ───────────────────────────────────
+      const sim = descriptionSimilarity(txDesc, cluster.seedLabel);
+      if (sim >= 0.5) {
+        cluster.txs.push(tx);
+        cluster.months.add(txMonth);
+        matched = true;
+        break;
+      }
+
+      // ── Path 2: recurring category ────────────────────────────────────────
+      if (
+        tx.categoryId === cluster.categoryId &&
+        RECURRING_CATEGORIES.has(tx.categoryId)
+      ) {
+        cluster.txs.push(tx);
+        cluster.months.add(txMonth);
+        matched = true;
+        break;
+      }
     }
 
     if (!matched) {
-      clusters.push({ txs: [tx], months: new Set([txMonth]) });
+      clusters.push({
+        txs: [tx],
+        months: new Set([txMonth]),
+        seedLabel: txDesc,
+        categoryId: tx.categoryId,
+      });
     }
   }
 
-  // Filter clusters that qualify as recurring
+  // ── Qualify clusters ──────────────────────────────────────────────────────
   const qualifying = clusters.filter(
-    (c) => c.months.size >= MIN_MONTHS && c.txs.length >= MIN_CLUSTER_SIZE,
+    (c) =>
+      c.months.size >= MIN_MONTHS &&
+      c.txs.length >= MIN_CLUSTER_SIZE &&
+      hasConsecutiveMonths(c.months),
   );
 
-  // Build label from most common description words
+  // ── Build label ───────────────────────────────────────────────────────────
   function buildLabel(txs: Transaction[]): string {
-    // Use the most common description (exact match first)
     const descCounts = new Map<string, number>();
     for (const t of txs) {
       const d = t.description?.trim() ?? '';
       if (d) descCounts.set(d, (descCounts.get(d) ?? 0) + 1);
     }
     if (descCounts.size === 0) return 'Регулярный платёж';
-    // Return the most frequent description, truncated
     const best = [...descCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
     return best.length > 40 ? best.slice(0, 37) + '…' : best;
   }
 
-  // IDs of already-known payments (to avoid re-suggesting dismissed ones)
+  // ── Dedup against existing ────────────────────────────────────────────────
   const existingLabels = new Set(existing.map((p) => p.label));
   const existingDismissed = new Set(
     existing.filter((p) => p.dismissedByUser).map((p) => p.label),
@@ -551,12 +619,10 @@ export function detectRecurringPayments(
 
     const label = buildLabel(cluster.txs);
 
-    // Skip if already known (confirmed or dismissed)
     if (existingLabels.has(label)) continue;
     if (existingDismissed.has(label)) continue;
 
-    // Find the most recent occurrence date
-    const lastTx = cluster.txs.sort((a, b) => b.date.localeCompare(a.date))[0];
+    const lastTx = [...cluster.txs].sort((a, b) => b.date.localeCompare(a.date))[0];
 
     const entry: RecurringPayment = {
       id: `rp_${Date.now()}_${Math.random().toString(36).slice(2)}`,
@@ -573,7 +639,6 @@ export function detectRecurringPayments(
     results.push(entry);
   }
 
-  // Sort by confidence desc, cap at 20 to avoid overwhelming the user
   const confidenceOrder: Record<RecurringPayment['confidence'], number> = {
     high: 0, medium: 1, low: 2,
   };
