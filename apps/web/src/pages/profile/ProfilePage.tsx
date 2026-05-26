@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import toast from 'react-hot-toast';
 import { useAuthStore } from '@/features/auth/store';
@@ -876,6 +877,7 @@ function NotificationSheet({ onClose }: { onClose: () => void }) {
 
 export function ProfilePage() {
   const { user, logout } = useAuthStore();
+  const navigate = useNavigate();
   const financeStore = useFinanceStore();
   const { streak, transactions, clearAllData } = financeStore;
   const [showFileModal, setShowFileModal] = useState(false);
@@ -998,6 +1000,7 @@ export function ProfilePage() {
         <div className="bg-white rounded-2xl overflow-hidden" style={{ boxShadow: 'var(--shadow-card)' }}>
           {[
             { icon: '📂', label: 'Импорт выписки из банка', action: () => setShowFileModal(true) },
+            { icon: '🔁', label: 'Регулярные платежи', action: () => navigate('/recurring') },
             { icon: '🔔', label: 'Уведомления', action: () => setShowNotifSheet(true) },
             { icon: '🔒', label: 'Конфиденциальность', action: () => alert('Все данные хранятся локально на вашем устройстве') },
             { icon: '❓', label: 'Помощь', action: () => alert('Напишите нам: @finwise_support') },

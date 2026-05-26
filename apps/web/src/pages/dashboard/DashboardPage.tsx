@@ -469,7 +469,20 @@ function UpcomingPaymentsWidget({ navigate }: { navigate: (p: string) => void })
   const upcoming = useFinanceStore((s) => s.getUpcomingPayments(7));
   const confirmed = upcoming.filter((p) => p.confirmedByUser);
 
-  if (confirmed.length === 0) return null;
+  if (confirmed.length === 0) {
+    return (
+      <motion.button
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        onClick={() => navigate('/recurring')}
+        className="w-full text-left bg-white rounded-2xl px-4 py-3 haptic flex items-center justify-between"
+        style={{ boxShadow: 'var(--shadow-card)' }}
+      >
+        <span className="text-sm text-gray-500">🔁 Регулярные платежи</span>
+        <span className="text-xs font-semibold" style={{ color: '#6C63FF' }}>Настроить →</span>
+      </motion.button>
+    );
+  }
 
   const total = confirmed.reduce((sum, p) => sum + p.amountMedian, 0);
   const visible = confirmed.slice(0, 3);
@@ -585,11 +598,6 @@ export function DashboardPage() {
               <span className="text-xs font-semibold" style={{ color: '#FF6B35' }}>Начни серию</span>
             </motion.button>
           )}
-          <Link to="/profile">
-            <div className="w-9 h-9 rounded-full bg-white shadow-sm flex items-center justify-center text-lg">
-              👤
-            </div>
-          </Link>
         </div>
       </motion.div>
 
@@ -639,49 +647,6 @@ export function DashboardPage() {
 
       {/* Upcoming recurring payments */}
       <UpcomingPaymentsWidget navigate={navigate} />
-
-      {/* Quick actions */}
-      <div className="space-y-2">
-        {/* Primary CTA — add expense */}
-        <motion.div
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.1 }}
-        >
-          <Link
-            to="/transactions/add"
-            className="flex items-center justify-center gap-2 w-full py-3.5 rounded-2xl haptic"
-            style={{ background: 'linear-gradient(135deg, #FF6B35, #FF8C42)' }}
-          >
-            <span className="text-xl">↓</span>
-            <span className="text-white font-bold text-sm">Добавить расход</span>
-          </Link>
-        </motion.div>
-        {/* Secondary actions row */}
-        <div className="grid grid-cols-3 gap-2">
-          {[
-            { icon: '↑', label: 'Доход', to: '/transactions/add?type=income', bg: '#E8FFF5', color: '#00C896' },
-            { icon: '📊', label: 'Анализ', to: '/analytics', bg: '#F0EEFF', color: '#6C63FF' },
-            { icon: '🤖', label: 'AI', to: '/ai', bg: '#F5F0FF', color: '#9B59B6' },
-          ].map((action, i) => (
-            <motion.div
-              key={action.label}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.15 + i * 0.05 }}
-            >
-              <Link
-                to={action.to}
-                className="flex flex-col items-center gap-1.5 py-3 rounded-2xl haptic"
-                style={{ background: action.bg }}
-              >
-                <div className="text-2xl">{action.icon}</div>
-                <div className="text-xs font-semibold" style={{ color: action.color }}>{action.label}</div>
-              </Link>
-            </motion.div>
-          ))}
-        </div>
-      </div>
 
       {/* Goals — always shown */}
       <div>
