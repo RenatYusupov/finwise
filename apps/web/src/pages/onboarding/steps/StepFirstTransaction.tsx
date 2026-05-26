@@ -1,21 +1,13 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
 import type { OnboardingData } from '@finwise/shared-types';
+import { CategoryPicker } from '@/features/finance/CategoryPicker';
 
 interface Props {
   data: Partial<OnboardingData>;
   updateData: (patch: Partial<OnboardingData>) => void;
   onNext: () => void;
 }
-
-const QUICK_CATEGORIES = [
-  { id: 'food', icon: '🍕', label: 'Еда' },
-  { id: 'transport', icon: '🚗', label: 'Транспорт' },
-  { id: 'shopping', icon: '🛍️', label: 'Покупки' },
-  { id: 'entertainment', icon: '🎬', label: 'Развлечения' },
-  { id: 'health', icon: '💊', label: 'Здоровье' },
-  { id: 'other', icon: '📦', label: 'Другое' },
-];
 
 export function StepFirstTransaction({ updateData, onNext }: Props) {
   const [amount, setAmount] = useState('');
@@ -56,19 +48,12 @@ export function StepFirstTransaction({ updateData, onNext }: Props) {
           <span className="text-3xl font-bold text-gray-400">₽</span>
         </div>
       </div>
-      <div className="grid grid-cols-3 gap-2 mb-6">
-        {QUICK_CATEGORIES.map((cat) => (
-          <button
-            key={cat.id}
-            onClick={() => setCategoryId(cat.id)}
-            className={`flex flex-col items-center gap-1 p-3 rounded-xl border-2 haptic transition-all ${
-              categoryId === cat.id ? 'border-blue-500 bg-blue-50' : 'border-gray-100 bg-white'
-            }`}
-          >
-            <span className="text-2xl">{cat.icon}</span>
-            <span className="text-xs text-gray-600">{cat.label}</span>
-          </button>
-        ))}
+      <div className="mb-6">
+        <CategoryPicker
+          type="expense"
+          selected={categoryId}
+          onChange={setCategoryId}
+        />
       </div>
       <div className="mt-6 space-y-3">
         <motion.button

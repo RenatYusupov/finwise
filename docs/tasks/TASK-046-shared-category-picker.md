@@ -1,6 +1,6 @@
 # TASK-046: Shared CategoryPicker — кастомные категории во всех пикерах
 
-**Статус:** 📝 Draft  
+**Статус:** ✅ Done  
 **Приоритет:** P2  
 **Sprint:** 5  
 **Создана:** 2026-05-26  
@@ -81,9 +81,36 @@ interface CategoryPickerProps {
 
 ## 💻 Отчёт разработчика (заполняет Developer)
 
-**Статус реализации:** ⬜ Ожидает
+**Статус реализации:** ✅ Реализовано  
+**Дата завершения:** 2026-05-26  
+**Коммит:** feat(TASK-046)
 
 ### Что сделано
-### Что НЕ сделано (если есть)
+
+- `apps/web/src/features/finance/CategoryPicker.tsx` — новый shared компонент:
+  - Системные категории, отфильтрованные по `type` (`EXPENSE_CATEGORIES` / `INCOME_CATEGORIES`)
+  - Кастомные категории из `useFinanceStore().customCategories`, отфильтрованные по типу
+  - Кнопка ✕ на кастомных категориях → диалог подтверждения → `deleteCustomCategory(id)`
+  - Кнопка «＋ Создать» → открывает `CreateCategorySheet`, при создании сразу выбирает новую категорию через `onChange`
+  - Если при удалении удалена выбранная категория — вызывает `onChange('')` для сброса
+- `PostImportWizard.tsx` — заменён inline грид `CLARIFY_EXPENSE_CATS/CLARIFY_INCOME_CATS` → `<CategoryPicker>`
+- `ProfilePage.tsx` (`ClarifyCategoryStep`) — заменён inline грид → `<CategoryPicker>` (используется `RecategorizationSheet`)
+- `StepFirstTransaction.tsx` — заменён inline `QUICK_CATEGORIES` грид → `<CategoryPicker type="expense">`
+- `RecurringPage.tsx` (`PaymentForm`) — заменён `EXPENSE_CATEGORIES.map()` грид → `<CategoryPicker type="expense">`
+
+### Что НЕ сделано
+- Multi-select — out of scope
+- Поиск по категориям — out of scope
+
 ### Риски и известные ограничения
+- В `StepFirstTransaction` категория `other` была несистемной (id не совпадает с `other_exp`). После замены маппинг стал корректным: `other_exp` из `EXPENSE_CATEGORIES`.
+
 ### Тестирование
+
+1. Создал кастомную категорию «Питомец» → зашёл в PostImportWizard → «Питомец» видно в пикере ✓
+2. Кнопка «+ Создать» в PostImportWizard → открывает CreateCategorySheet, новая категория сразу выбирается ✓
+3. RecategorizationSheet (other_exp транзакции) → кастомные категории видны, кнопка создания есть ✓
+4. StepFirstTransaction (онбординг) → все системные категории + кастомные ✓
+5. RecurringPage → форма добавления платежа → кастомные категории доступны ✓
+6. Удаление кастомной категории → диалог подтверждения → после удаления пропадает из всех пикеров ✓
+7. `grep -r "CLARIFY_EXPENSE_CATS\|CLARIFY_INCOME_CATS\|QUICK_CATEGORIES" apps/web/src/pages` → 0 строк ✓

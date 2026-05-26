@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import toast from 'react-hot-toast';
 import { useAuthStore } from '@/features/auth/store';
 import { useFinanceStore, cancelScheduledUpload, forceSyncToCloud } from '@/features/finance/store';
+import { CategoryPicker } from '@/features/finance/CategoryPicker';
 import { useUIStore } from '@/features/ui/store';
 import { formatCurrency } from '@/shared/utils/format';
 import { parseBankXLSX, parseTbankPDF, parseCSV, rowToTransactionGeneric } from './bankImport';
@@ -259,30 +260,6 @@ function computeClarifyQueue(
 
 export { ClarifyCategoryStep };
 
-const CLARIFY_EXPENSE_CATS = [
-  { id: 'food',          icon: '🍔', name: 'Еда' },
-  { id: 'cafe',          icon: '☕', name: 'Кафе' },
-  { id: 'transport',     icon: '🚗', name: 'Транспорт' },
-  { id: 'shopping',      icon: '🛍️', name: 'Покупки' },
-  { id: 'health',        icon: '💊', name: 'Здоровье' },
-  { id: 'entertainment', icon: '🎮', name: 'Развлечения' },
-  { id: 'sport',         icon: '🏋️', name: 'Спорт' },
-  { id: 'beauty',        icon: '💄', name: 'Красота' },
-  { id: 'home',          icon: '🏠', name: 'Дом' },
-  { id: 'education',     icon: '📚', name: 'Учёба' },
-  { id: 'travel',        icon: '✈️', name: 'Путешествия' },
-  { id: 'other_exp',     icon: '💸', name: 'Другое' },
-];
-
-const CLARIFY_INCOME_CATS = [
-  { id: 'salary',     icon: '💼', name: 'Зарплата' },
-  { id: 'freelance',  icon: '💻', name: 'Фриланс' },
-  { id: 'gift',       icon: '🎁', name: 'Подарок' },
-  { id: 'investment', icon: '📈', name: 'Инвестиции' },
-  { id: 'cashback',   icon: '💳', name: 'Кэшбэк' },
-  { id: 'other_inc',  icon: '💰', name: 'Другое' },
-];
-
 function ClarifyCategoryStep({
   txIds,
   onDone,
@@ -303,11 +280,11 @@ function ClarifyCategoryStep({
   }
 
   const tx = queue[index]!;
-  const cats = tx.type === 'income' ? CLARIFY_INCOME_CATS : CLARIFY_EXPENSE_CATS;
   const progress = index + 1;
   const total = queue.length;
 
   const pick = (categoryId: string) => {
+    if (!categoryId) return;
     updateTransaction(tx.id, { categoryId });
     if (index + 1 >= queue.length) {
       onDone();
@@ -371,22 +348,12 @@ function ClarifyCategoryStep({
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-2 mb-4">
-          {cats.map((cat) => (
-            <motion.button
-              key={cat.id}
-              whileTap={{ scale: 0.93 }}
-              onClick={() => pick(cat.id)}
-              className="flex flex-col items-center gap-1 py-3 rounded-2xl text-center haptic"
-              style={{
-                background: tx.categoryId === cat.id ? '#6C63FF' : '#F3F4F6',
-                color: tx.categoryId === cat.id ? '#fff' : '#374151',
-              }}
-            >
-              <span className="text-xl leading-none">{cat.icon}</span>
-              <span className="text-xs font-medium leading-tight">{cat.name}</span>
-            </motion.button>
-          ))}
+        <div className="mb-4">
+          <CategoryPicker
+            type={tx.type === 'income' ? 'income' : 'expense'}
+            selected={tx.categoryId}
+            onChange={pick}
+          />
         </div>
 
         <button onClick={skip} className="w-full py-2 text-xs text-gray-400 haptic">

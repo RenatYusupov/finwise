@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ALL_CATEGORIES, EXPENSE_CATEGORIES, useFinanceStore, type RecurringPayment } from '@/features/finance/store';
+import { CategoryPicker } from '@/features/finance/CategoryPicker';
 import { formatCurrency } from '@/shared/utils/format';
 
 function haptic(type: 'light' | 'success' | 'warning' = 'light') {
@@ -145,18 +146,12 @@ function PaymentForm({
 
           <div>
             <span className="text-xs font-semibold text-gray-500 uppercase">Категория</span>
-            <div className="mt-2 grid grid-cols-4 gap-2">
-              {EXPENSE_CATEGORIES.map((cat) => (
-                <button
-                  key={cat.id}
-                  onClick={() => setForm((f) => ({ ...f, categoryId: cat.id }))}
-                  className="rounded-2xl py-2 px-1 text-xs font-medium haptic"
-                  style={{ background: form.categoryId === cat.id ? '#6C63FF' : '#F3F4F6', color: form.categoryId === cat.id ? '#fff' : '#374151' }}
-                >
-                  <div className="text-lg">{cat.icon}</div>
-                  <div className="truncate">{cat.name}</div>
-                </button>
-              ))}
+            <div className="mt-2">
+              <CategoryPicker
+                type="expense"
+                selected={form.categoryId}
+                onChange={(catId) => setForm((f) => ({ ...f, categoryId: catId }))}
+              />
             </div>
           </div>
 
