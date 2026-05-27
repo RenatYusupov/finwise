@@ -13,7 +13,7 @@ export async function navTo(page: Page, section: 'analytics' | 'ai' | 'budget' |
     profile: 'Профиль',
   };
   await page.getByText(labels[section]).click();
-  await page.waitForLoadState('networkidle');
+  await page.waitForLoadState('load');
 }
 
 /**

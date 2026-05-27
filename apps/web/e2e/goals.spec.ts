@@ -30,7 +30,7 @@ test.describe('Цели — пустое состояние', () => {
   test.beforeEach(async ({ page }) => {
     await bypassOnboarding(page);
     await page.goto('/finwise/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
     await goToGoals(page);
   });
 
@@ -56,7 +56,7 @@ test.describe('Цели — создание через кнопку "Новая
   test.beforeEach(async ({ page }) => {
     await bypassOnboarding(page);
     await page.goto('/finwise/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
     await goToGoals(page);
   });
 
@@ -112,7 +112,7 @@ test.describe('Цели — с существующими данными', () =>
     await bypassOnboarding(page);
     await seedFinanceData(page, { goals: [SAMPLE_GOAL] });
     await page.goto('/finwise/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
     await goToGoals(page);
   });
 

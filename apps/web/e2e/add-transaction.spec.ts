@@ -20,7 +20,7 @@ test.describe('Добавление транзакции', () => {
   test.beforeEach(async ({ page }) => {
     await bypassOnboarding(page);
     await page.goto('/finwise/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
     await goToAddTransaction(page);
   });
 

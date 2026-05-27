@@ -45,7 +45,7 @@ test.describe('Дашборд — пустое состояние', () => {
   test.beforeEach(async ({ page }) => {
     await bypassOnboarding(page);
     await page.goto('/finwise/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
   });
 
   test.afterEach(async ({ page }) => {
@@ -72,7 +72,7 @@ test.describe('Дашборд — с транзакциями', () => {
     await bypassOnboarding(page);
     await seedFinanceData(page, { transactions: SAMPLE_TRANSACTIONS });
     await page.goto('/finwise/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
   });
 
   test.afterEach(async ({ page }) => {
@@ -100,23 +100,23 @@ test.describe('Дашборд — с транзакциями', () => {
 
 test.describe('Дашборд — онбординг-редирект', () => {
   test('незавершённый онбординг показывает экран онбординга', async ({ page }) => {
-    // Явно очищаем localStorage через addInitScript ДО загрузки страницы.
-    // Это безопасно: скрипт запускается до инициализации Zustand,
-    // поэтому storage events не стреляют и редиректов не происходит.
+    // GitHub Pages загружает telegram-web-app.js, что создаёт window.Telegram.WebApp
+    // и IS_TELEGRAM вычисляется как true — редирект на онбординг не срабатывает.
+    // Явно устанавливаем __isTelegram = false ДО загрузки страницы, чтобы IS_TELEGRAM = false
+    // (проверяется первым в цепочке условий App.tsx).
     await page.addInitScript(() => {
-      localStorage.clear();
-      // НЕ устанавливаем finwise-auth → onboardingCompleted останется false
+      localStorage.removeItem('finwise-auth');
+      (window as unknown as Record<string, unknown>).__isTelegram = false;
     });
-
     await page.goto('/finwise/');
-    // useEffect видит onboardingCompleted=false и вызывает navigate('/onboarding')
-    await expect(page.getByText('Привет! Я FinWise')).toBeVisible({ timeout: 10_000 });
+    // IS_TELEGRAM=false + onboardingCompleted=false → navigate('/onboarding')
+    await expect(page.getByText('Привет! Я FinWise')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByText('Начать за 2 минуты →')).toBeVisible();
   });
 
   test('страница онбординга отображается корректно', async ({ page }) => {
     await page.goto('/finwise/onboarding');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
     // Нет ошибки рендера
     await expect(page.getByText('Ошибка рендера')).not.toBeVisible();
   });
