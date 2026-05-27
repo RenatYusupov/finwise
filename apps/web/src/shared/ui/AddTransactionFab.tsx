@@ -6,6 +6,7 @@ export function AddTransactionFab() {
 
   return (
     <motion.button
+      data-testid="fab-add-transaction"
       whileTap={{ scale: 0.88 }}
       whileHover={{ scale: 1.05 }}
       onClick={() => navigate('/transactions/add')}
